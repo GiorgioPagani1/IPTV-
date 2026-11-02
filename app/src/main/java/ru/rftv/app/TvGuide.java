@@ -34,6 +34,7 @@ public final class TvGuide {
     }
     public static final class Slot {
         public Show now, next;
+        public final List<Show> schedule = new ArrayList<>();
     }
     private final Map<String,Slot> guide = new HashMap<>();
     private boolean loaded=false;
@@ -43,6 +44,15 @@ public final class TvGuide {
         String key=canonical(c.id);
         Slot s=guide.get(key);
         if(s==null) s=guide.get(normalize(c.name));
+        if(s!=null && !s.schedule.isEmpty()) {
+            long now=System.currentTimeMillis();
+            s.now=null;
+            s.next=null;
+            for(Show show:s.schedule) {
+                if(show.start<=now && show.end>now) s.now=show;
+                if(show.start>now && (s.next==null || show.start<s.next.start)) s.next=show;
+            }
+        }
         return s;
     }
     public synchronized boolean hasLoaded() {return loaded;}
@@ -125,11 +135,12 @@ public final class TvGuide {
                         channelId=null;channelDisplay=null;
                     } else if("programme".equals(tag)) {
                         if(title!=null && progChannel!=null && start>0 && stop>now &&
-                            start<now+24*60*60*1000L && stop>start) {
+                            start<now+12*60*60*1000L && stop>start) {
                             String id=canonical(progChannel);
                             Slot slot=byId.get(id);
                             if(slot==null){slot=new Slot();byId.put(id,slot);}
                             Show show=new Show(title.trim(),start,stop);
+                            if(slot.schedule.size()<160) slot.schedule.add(show);
                             if(start<=now && stop>now &&
                                 (slot.now==null || show.start>slot.now.start)) slot.now=show;
                             else if(start>now && (slot.next==null || start<slot.next.start)) slot.next=show;
@@ -140,6 +151,9 @@ public final class TvGuide {
                 }
                 event=parser.next();
             }
+        }
+        for(Slot slot:byId.values()) {
+            slot.schedule.sort((a,b)->Long.compare(a.start,b.start));
         }
         Map<String,Slot> merged=new HashMap<>(byId);
         for(Map.Entry<String,String> pair:names.entrySet()) {
