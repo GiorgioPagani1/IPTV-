@@ -639,17 +639,15 @@ public final class MainActivity extends Activity {
     }
 
     private void loadGuide() {
-        if(epgLoading) return;
+        if(epgLoading)return;
         epgLoading=true;
+        final ArrayList<Channel> currentChannels=new ArrayList<>(channels);
         new Thread(()->{
-            Map<String,TvGuide.Slot> data=null;
-            try {data=TvGuide.fetch(getApplicationContext());}
-            catch(Exception ignored){}
-            final Map<String,TvGuide.Slot> ready=data;
+            TvGuide.LoadResult ready=TvGuide.fetch(getApplicationContext(),currentChannels);
             runOnUiThread(()->{
                 epgLoading=false;
                 if(isFinishing()||isDestroyed())return;
-                if(ready!=null) tvGuide.setFrom(ready);
+                tvGuide.setFrom(ready);
                 if(guidePanel!=null)guidePanel.updateGuide(tvGuide);
             });
         }).start();
