@@ -36,17 +36,17 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
       - name: Prepare direct-download APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk RF-TV-2.2.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk RF-TV-2.3.apk
       - name: Publish Android APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.2.0
-          name: РФ ТВ 2.2 — тестовая версия
+          tag_name: v2.3.0
+          name: РФ ТВ 2.3 — тестовая версия
           target_commitish: ${{ github.sha }}
           prerelease: true
           draft: false
-          files: RF-TV-2.2.apk
+          files: RF-TV-2.3.apk
           body: |
-            Тестовая версия РФ ТВ 2.2 для телефона Android и Android TV.
-            Скачать: RF-TV-2.2.apk (ниже в Assets).
+            Тестовая версия РФ ТВ 2.3 для телефона Android и Android TV.
+            Скачать: RF-TV-2.3.apk (ниже в Assets).
             Проверка эфиров зависит от страны и доступных источников.
