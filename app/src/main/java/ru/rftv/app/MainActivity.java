@@ -625,10 +625,11 @@ public final class MainActivity extends Activity {
                 if(index>=0) play(index);
             }
             @Override public void onClose() {closeGuide();}
+            @Override public void onRefresh() {loadGuide(true);}
         });
         root.addView(guidePanel,new FrameLayout.LayoutParams(-1,-1));
         guidePanel.requestFocus();
-        if(!tvGuide.hasLoaded())loadGuide();
+        if(!tvGuide.hasLoaded())loadGuide(false);
     }
 
     private void closeGuide() {
@@ -638,12 +639,12 @@ public final class MainActivity extends Activity {
         showControls();
     }
 
-    private void loadGuide() {
+    private void loadGuide(boolean forceRefresh) {
         if(epgLoading)return;
         epgLoading=true;
         final ArrayList<Channel> currentChannels=new ArrayList<>(channels);
         new Thread(()->{
-            TvGuide.LoadResult ready=TvGuide.fetch(getApplicationContext(),currentChannels);
+            TvGuide.LoadResult ready=TvGuide.fetch(getApplicationContext(),currentChannels,forceRefresh);
             runOnUiThread(()->{
                 epgLoading=false;
                 if(isFinishing()||isDestroyed())return;
