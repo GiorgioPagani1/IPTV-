@@ -971,6 +971,10 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if(keyCode==KeyEvent.KEYCODE_GUIDE || keyCode==KeyEvent.KEYCODE_INFO) {
+            if(guidePanel!=null)closeGuide(); else openGuide();
+            return true;
+        }
         if(guidePanel!=null)return super.onKeyDown(keyCode,event);
         if(drawerOpen) {
             if((keyCode==KeyEvent.KEYCODE_DPAD_CENTER || keyCode==KeyEvent.KEYCODE_ENTER)
