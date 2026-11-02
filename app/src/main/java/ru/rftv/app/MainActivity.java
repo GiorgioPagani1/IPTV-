@@ -218,7 +218,7 @@ public final class MainActivity extends Activity {
         scroll.setVisibility(show?View.VISIBLE:View.GONE);
         allTab.setVisibility(show?View.VISIBLE:View.GONE);
         favoriteTab.setVisibility(show?View.VISIBLE:View.GONE);
-        screen.findViewById(android.R.id.content).requestLayout();
+        screen.requestLayout();
         videoHolder.setLayoutParams(show?
             new LinearLayout.LayoutParams(-1,videoHeight):
             new LinearLayout.LayoutParams(-1,0,1));
