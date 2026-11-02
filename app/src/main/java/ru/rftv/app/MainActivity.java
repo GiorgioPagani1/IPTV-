@@ -478,16 +478,23 @@ public final class MainActivity extends Activity {
         shown.clear();
         for(int i=0; i<channels.size(); i++) {
             Channel c = channels.get(i);
+            if(showHidden ? !channelSettings.hidden(c) : channelSettings.hidden(c)) continue;
             if(favoritesOnly && !favorites.contains(c.key())) continue;
             if(!query.isEmpty() && !c.name.toLowerCase(Locale.ROOT).contains(query)) continue;
             shown.add(i);
         }
-        allTab.setTextColor(favoritesOnly ? DIM : BLUE);
+        allTab.setTextColor((favoritesOnly || showHidden) ? DIM : BLUE);
         favTab.setTextColor(favoritesOnly ? BLUE : DIM);
+        if(hiddenTab != null) {
+            hiddenTab.setText("Скрытые каналы ("+channelSettings.hiddenCount(channels)+") — "+
+                (showHidden ? "вернуться к общему списку" : "показать / вернуть"));
+            hiddenTab.setTextColor(showHidden ? BLUE : DIM);
+        }
         allTab.setBackground(rounded(favoritesOnly ? 0xff1a2636 : 0xff294967, 10));
         favTab.setBackground(rounded(favoritesOnly ? 0xff294967 : 0xff1a2636, 10));
         adapter.notifyDataSetChanged();
-        if(countLabel != null) countLabel.setText("Найдено: "+shown.size()+"  ·  Всего: "+channels.size());
+        if(countLabel != null) countLabel.setText("Найдено: "+shown.size()+
+            "  ·  Удерживайте OK или строку для действий");
     }
 
     private void toggleFavorite(Channel channel) {
@@ -509,11 +516,18 @@ public final class MainActivity extends Activity {
         channelSubtitle.setText("● ПРЯМОЙ ЭФИР  ·  IPTV");
         favoriteButton.setText(favorites.contains(c.key()) ? "★" : "☆");
         favoriteButton.setTextColor(favorites.contains(c.key()) ? YELLOW : WHITE);
+        updateProgram();
     }
 
-    private void play(int index) {
+    private void play(int index) { play(index, null); }
+
+    private void play(int index, String selectedSource) {
         if(index < 0 || index >= channels.size()) return;
         handler.removeCallbacks(streamWatchdog);
+        if(current >= 0 && current < channels.size() && current != index) {
+            previousChannelKey = channels.get(current).key();
+            prefs.edit().putString("previous_channel_v22",previousChannelKey).apply();
+        }
         current = index;
         Channel c = channels.get(index);
         prefs.edit().putString("last_channel", c.key()).apply();
@@ -522,11 +536,20 @@ public final class MainActivity extends Activity {
         allSourcesFailed = false;
         activeSources.clear();
         String good = prefs.getString("good_source_" + c.key(), "");
-        if(!good.isEmpty() && c.sources.contains(good)) activeSources.add(good);
-        for(String url : c.sources) if(!activeSources.contains(url)) activeSources.add(url);
+        if(selectedSource!=null && c.sources.contains(selectedSource)) activeSources.add(selectedSource);
+        if(!good.isEmpty() && c.sources.contains(good) && !isBad(good) && !activeSources.contains(good))
+            activeSources.add(good);
+        for(String url : c.sources)
+            if(!isBad(url) && !activeSources.contains(url)) activeSources.add(url);
+        for(String url : c.sources)
+            if(!activeSources.contains(url)) activeSources.add(url);
         updateCurrent();
         adapter.notifyDataSetChanged();
         if(drawerOpen) closeDrawer(); else showControls();
+        zappingBadge.setText(c.name);
+        zappingBadge.setVisibility(View.VISIBLE);
+        handler.removeCallbacks(hideZapping);
+        handler.postDelayed(hideZapping, 2300L);
         startSource();
     }
 
@@ -565,6 +588,12 @@ public final class MainActivity extends Activity {
         if(allSourcesFailed || current < 0) return;
         handler.removeCallbacks(streamWatchdog);
         lastError = cause;
+        if(sourceIndex >= 0 && sourceIndex < activeSources.size()) {
+            String failed=activeSources.get(sourceIndex);
+            long ttl = (cause.contains("HTTP 403") || cause.contains("HTTP 404") ||
+                cause.contains("HTTP 401")) ? 6*60*60*1000L : 20*60*1000L;
+            prefs.edit().putLong(badKey(failed),System.currentTimeMillis()+ttl).apply();
+        }
         sourceIndex++;
         startSource();
     }
@@ -587,8 +616,65 @@ public final class MainActivity extends Activity {
 
     private void move(int delta) {
         if(channels.isEmpty()) { openDrawer(); return; }
-        int next = current < 0 ? 0 : (current + delta + channels.size()) % channels.size();
-        play(next);
+        int next = current;
+        for(int i=0;i<channels.size();i++) {
+            next = current < 0 ? 0 : (next+delta+channels.size())%channels.size();
+            if(!channelSettings.hidden(channels.get(next))) {play(next);return;}
+        }
+        openDrawer();
+    }
+
+    private String badKey(String url) {
+        return "source_bad_until_" + Integer.toHexString(url.hashCode());
+    }
+    private boolean isBad(String url) {
+        return prefs.getLong(badKey(url),0L)>System.currentTimeMillis();
+    }
+
+    private void returnToPrevious() {
+        if(previousChannelKey.isEmpty()) return;
+        for(int i=0;i<channels.size();i++) {
+            if(channels.get(i).key().equals(previousChannelKey) && !channelSettings.hidden(channels.get(i))) {
+                play(i);
+                return;
+            }
+        }
+    }
+
+    private void updateProgram() {
+        if(programNow==null || programNext==null) return;
+        TvGuide.Slot slot = current>=0 && current<channels.size() ? tvGuide.forChannel(channels.get(current)) : null;
+        if(slot==null || (slot.now==null && slot.next==null)) {
+            programNow.setVisibility(View.GONE);
+            programNext.setVisibility(View.GONE);
+            return;
+        }
+        if(slot.now!=null) {
+            programNow.setVisibility(View.VISIBLE);
+            programNow.setText("Сейчас: "+slot.now.title+"  •  до "+TvGuide.time(slot.now.end));
+        } else programNow.setVisibility(View.GONE);
+        if(slot.next!=null) {
+            programNext.setVisibility(View.VISIBLE);
+            programNext.setText("Далее "+TvGuide.time(slot.next.start)+": "+slot.next.title);
+        } else programNext.setVisibility(View.GONE);
+    }
+
+    private void loadGuide() {
+        if(epgLoading) return;
+        epgLoading=true;
+        new Thread(()->{
+            Map<String,TvGuide.Slot> data=null;
+            try {data=TvGuide.fetch(getApplicationContext());}
+            catch(Exception ignored){}
+            final Map<String,TvGuide.Slot> ready=data;
+            runOnUiThread(()->{
+                epgLoading=false;
+                if(isFinishing()||isDestroyed())return;
+                if(ready!=null) tvGuide.setFrom(ready);
+                updateProgram();
+                if(adapter!=null) adapter.notifyDataSetChanged();
+            });
+        }).start();
     }
 
     private int channelRank(String name) {
@@ -648,6 +734,7 @@ public final class MainActivity extends Activity {
                     ? channels.get(current).key() : prefs.getString("last_channel", "");
                 channels.clear();
                 channels.addAll(result);
+                channelSettings.sort(channels);
                 int found = -1;
                 for(int i=0;i<channels.size();i++) {
                     if(channels.get(i).key().equals(previousKey)) { found=i; break; }
@@ -656,6 +743,7 @@ public final class MainActivity extends Activity {
                 current = found;
                 filterChannels();
                 updateCurrent();
+                if(!channels.isEmpty()) loadGuide();
                 if(channels.isEmpty()) {
                     setMessage("Не удалось загрузить каналы. Проверьте подключение.");
                     showControls();
