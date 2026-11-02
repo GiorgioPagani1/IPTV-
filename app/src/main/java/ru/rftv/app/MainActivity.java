@@ -33,6 +33,9 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
+import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.HttpDataSource;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -43,6 +46,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
+import java.net.SocketTimeoutException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -52,6 +56,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String SOURCE = "https://iptv-org.github.io/iptv/countries/ru.m3u";
     private static final long AUTO_HIDE_MS = 5000L;
+    private static final long STREAM_TIMEOUT_MS = 14000L;
     private static final int WHITE = Color.WHITE, DIM = 0xffb8c4d5, BLUE = 0xff92bfff, YELLOW = 0xffffcf64;
     private final ArrayList<Channel> channels = new ArrayList<>();
     private final ArrayList<Integer> shown = new ArrayList<>();
@@ -60,6 +65,8 @@ public final class MainActivity extends Activity {
     private final ExecutorService iconThreads = Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> iconCache = new LruCache<>(64);
     private final Runnable hideTask = () -> hideControls();
+    private final Runnable streamWatchdog = () -> switchSource("Превышено время ожидания");
+    private final ArrayList<String> activeSources = new ArrayList<>();
     private SharedPreferences prefs;
     private FrameLayout root, controls, shade;
     private LinearLayout drawer, header;
@@ -70,7 +77,9 @@ public final class MainActivity extends Activity {
     private EditText search;
     private ListView channelList;
     private ChannelAdapter adapter;
-    private int current = -1;
+    private int current = -1, sourceIndex = 0;
+    private boolean allSourcesFailed = false;
+    private String lastError = "";
     private boolean controlsVisible = true, drawerOpen = false, favoritesOnly = false, loading = false;
     private String query = "";
 
@@ -86,17 +95,34 @@ public final class MainActivity extends Activity {
         prefs = getSharedPreferences("rf_tv", MODE_PRIVATE);
         favorites.addAll(prefs.getStringSet("favorites", new HashSet<>()));
         createUi();
-        player = new ExoPlayer.Builder(this).build();
+        DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
+            .setUserAgent("RF-TV/2.1 (Android IPTV Player)")
+            .setConnectTimeoutMs(10000)
+            .setReadTimeoutMs(12000)
+            .setAllowCrossProtocolRedirects(true);
+        player = new ExoPlayer.Builder(this)
+            .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(http))
+            .build();
         videoView.setPlayer(player);
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
-                if(current < 0 || current >= channels.size()) return;
-                if(state == Player.STATE_BUFFERING) setMessage("Подключаемся к эфиру…");
-                if(state == Player.STATE_READY) setMessage(null);
+                if(current < 0 || current >= channels.size() || allSourcesFailed) return;
+                if(state == Player.STATE_BUFFERING) {
+                    setMessage("Проверяем эфир • источник " + (sourceIndex+1) + "/" + activeSources.size());
+                    scheduleStreamTimeout();
+                }
+                if(state == Player.STATE_READY) {
+                    handler.removeCallbacks(streamWatchdog);
+                    setMessage(null);
+                    if(sourceIndex < activeSources.size()) {
+                        prefs.edit().putString("good_source_" + channels.get(current).key(),
+                            activeSources.get(sourceIndex)).apply();
+                    }
+                    channelSubtitle.setText("● ПРЯМОЙ ЭФИР   •   " + (sourceIndex+1) + "/" + activeSources.size());
+                }
             }
             @Override public void onPlayerError(PlaybackException exception) {
-                setMessage("Эфир недоступен. Попробуйте другой канал.");
-                showControls();
+                if(!allSourcesFailed) switchSource(errorDescription(exception));
             }
         });
         loadChannels();
@@ -221,6 +247,13 @@ public final class MainActivity extends Activity {
         header.setPadding(dp(18), dp(24), dp(15), dp(14));
         TextView heading = text("Телеканалы", 23, WHITE, true);
         header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView refresh = text("↻", 25, BLUE, true);
+        refresh.setGravity(Gravity.CENTER);
+        refresh.setContentDescription("Обновить список каналов");
+        refresh.setFocusable(true);
+        refresh.setClickable(true);
+        refresh.setOnClickListener(v -> { closeDrawer(); loadChannels(); });
+        header.addView(refresh, new LinearLayout.LayoutParams(dp(52), dp(44)));
         TextView close = text("×", 33, DIM, false);
         close.setGravity(Gravity.CENTER);
         close.setContentDescription("Закрыть список");
