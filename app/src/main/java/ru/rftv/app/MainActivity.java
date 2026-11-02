@@ -760,6 +760,76 @@ public final class MainActivity extends Activity {
         }).start();
     }
 
+    private void showChannelMenu(Channel channel) {
+        if(channel==null) return;
+        final String[] options = new String[]{
+            channelSettings.pinned(channel) ? "Открепить канал" : "Закрепить в начале списка",
+            "↑ Переместить выше",
+            "↓ Переместить ниже",
+            channelSettings.hidden(channel) ? "Показать канал" : "Скрыть канал",
+            "Выбрать источник эфира (" + channel.sources.size() + ")",
+            favorites.contains(channel.key()) ? "Убрать из избранного" : "Добавить в избранное"
+        };
+        new AlertDialog.Builder(this)
+            .setTitle(channel.name)
+            .setItems(options,(dialog,which)->{
+                switch(which) {
+                    case 0:
+                        channelSettings.togglePin(channel);
+                        channelSettings.sort(channels);
+                        current=activeChannelIndex();
+                        filterChannels();
+                        break;
+                    case 1:
+                    case 2:
+                        channelSettings.move(channel,which==1?-1:1,channels);
+                        current=activeChannelIndex();
+                        filterChannels();
+                        break;
+                    case 3:
+                        channelSettings.toggleHidden(channel);
+                        filterChannels();
+                        break;
+                    case 4:
+                        showSources(channel);
+                        break;
+                    case 5:
+                        toggleFavorite(channel);
+                        break;
+                    default: break;
+                }
+            })
+            .setNegativeButton("Закрыть",null)
+            .show();
+    }
+
+    private String activeChannelKey() {
+        if(current>=0 && current<channels.size()) return channels.get(current).key();
+        return "";
+    }
+
+    private int activeChannelIndex() {
+        String key=prefs.getString("last_channel","");
+        for(int i=0;i<channels.size();i++)
+            if(channels.get(i).key().equals(key))return i;
+        return current<channels.size()?current:-1;
+    }
+
+    private void showSources(Channel channel) {
+        String[] entries=new String[channel.sources.size()];
+        for(int i=0;i<entries.length;i++) {
+            String url=channel.sources.get(i);
+            String host="источник";
+            try {host=new URL(url).getHost();}catch(Exception ignored){}
+            entries[i]=(i+1)+".  "+host+(isBad(url)?"  •  недавняя ошибка":"");
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Источник: "+channel.name)
+            .setItems(entries,(d,selected)->play(positionOf(channel),channel.sources.get(selected)))
+            .setNegativeButton("Отмена",null)
+            .show();
+    }
+
     private class ChannelAdapter extends BaseAdapter {
         @Override public int getCount() { return shown.size(); }
         @Override public Object getItem(int p) { return channels.get(shown.get(p)); }
@@ -776,6 +846,9 @@ public final class MainActivity extends Activity {
             row.setFocusable(true);
             row.setClickable(true);
             row.setOnClickListener(v -> play(positionOf(c)));
+            row.setTag(c);
+            row.setLongClickable(true);
+            row.setOnLongClickListener(v -> {showChannelMenu(c);return true;});
             row.setOnFocusChangeListener((v, focused) -> row.setBackground(
                 rounded(focused ? 0xff3d607f : (positionOf(c) == current ? 0xff324b63 : 0x00192634), 11)
             ));
@@ -797,7 +870,7 @@ public final class MainActivity extends Activity {
 
             LinearLayout details = new LinearLayout(MainActivity.this);
             details.setOrientation(LinearLayout.VERTICAL);
-            TextView name = text(c.name, 15, WHITE, false);
+            TextView name = text((channelSettings.pinned(c)?"📌  ":"")+c.name, 15, WHITE, false);
             name.setSingleLine(true);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
             details.addView(name);
@@ -807,8 +880,13 @@ public final class MainActivity extends Activity {
                     (player != null && player.getPlaybackState() == Player.STATE_READY ?
                     "● Прямой эфир" : "Проверяем эфир…");
             }
+            TvGuide.Slot epg = tvGuide.forChannel(c);
+            if(epg!=null && epg.now!=null) status = "Сейчас: " + epg.now.title;
+            else if(epg!=null && epg.next!=null) status = "Далее " + TvGuide.time(epg.next.start) + ": " + epg.next.title;
             TextView subtitle = text(status, 11,
                 positionOf(c) == current && !allSourcesFailed ? BLUE : DIM, false);
+            subtitle.setSingleLine(true);
+            subtitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
             details.addView(subtitle);
             LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(0, -2, 1f);
             detailsParams.leftMargin = dp(12);
@@ -880,7 +958,26 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if(drawerOpen) return super.onKeyDown(keyCode,event);
+        if(drawerOpen) {
+            if((keyCode==KeyEvent.KEYCODE_DPAD_CENTER || keyCode==KeyEvent.KEYCODE_ENTER)
+                && (event.isLongPress() || event.getRepeatCount()>=5)) {
+                View focused=getCurrentFocus();
+                while(focused!=null) {
+                    if(focused.getTag() instanceof Channel) {
+                        showChannelMenu((Channel)focused.getTag());
+                        return true;
+                    }
+                    if(!(focused.getParent() instanceof View)) break;
+                    focused=(View)focused.getParent();
+                }
+                int selected=channelList.getSelectedItemPosition();
+                if(selected>=0 && selected<shown.size()) {
+                    showChannelMenu(channels.get(shown.get(selected)));
+                    return true;
+                }
+            }
+            return super.onKeyDown(keyCode,event);
+        }
         if(keyCode == KeyEvent.KEYCODE_CHANNEL_UP || keyCode == KeyEvent.KEYCODE_MEDIA_NEXT ||
            (!controlsVisible && keyCode == KeyEvent.KEYCODE_DPAD_UP)) {
             move(1); return true;
