@@ -13,12 +13,13 @@ public final class PlaylistParser {
         List<Channel> out=new ArrayList<>();
         Set<String> seen=new HashSet<>();
         if(m3u==null)return out;
-        String id="",group="",name=null;
+        String id="",group="",logo="",name=null;
         for(String raw:m3u.split("\\r?\\n")) {
             String line=raw.trim();
             if(line.startsWith("#EXTINF:")) {
                 id=attr(line,"tvg-id");
                 group=attr(line,"group-title");
+                logo=attr(line,"tvg-logo");
                 int comma=line.lastIndexOf(',');
                 name=comma>=0?line.substring(comma+1).trim():id;
                 if(name.isEmpty())name="Телеканал";
@@ -26,9 +27,9 @@ public final class PlaylistParser {
             } else if(name!=null && !line.startsWith("#") && !line.isEmpty()) {
                 if(line.startsWith("https://") || line.startsWith("http://")) {
                     String uniq=(id+"|"+name+"|"+line).toLowerCase(Locale.ROOT);
-                    if(seen.add(uniq))out.add(new Channel(id,name,line,group));
+                    if(seen.add(uniq))out.add(new Channel(id,name,line,group,logo));
                 }
-                name=null; id=""; group="";
+                name=null; id=""; group=""; logo="";
             }
         }
         return out;
