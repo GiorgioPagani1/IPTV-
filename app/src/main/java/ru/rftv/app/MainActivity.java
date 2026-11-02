@@ -1,18 +1,32 @@
 package ru.rftv.app;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.util.DisplayMetrics;
+import android.util.LruCache;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.ListView;
 import android.widget.TextView;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.PlaybackException;
@@ -20,7 +34,6 @@ import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.ui.PlayerView;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -33,287 +46,637 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity {
-    private static final String SOURCE="https://iptv-org.github.io/iptv/countries/ru.m3u";
-    private static final int BG=0xff09101a, PANEL=0xff142237, ACCENT=0xff6fafff;
-    private final ArrayList<Channel> channels=new ArrayList<>();
-    private final Set<String> favorites=new HashSet<>();
+    private static final String SOURCE = "https://iptv-org.github.io/iptv/countries/ru.m3u";
+    private static final long AUTO_HIDE_MS = 5000L;
+    private static final int WHITE = Color.WHITE, DIM = 0xffb8c4d5, BLUE = 0xff92bfff, YELLOW = 0xffffcf64;
+    private final ArrayList<Channel> channels = new ArrayList<>();
+    private final ArrayList<Integer> shown = new ArrayList<>();
+    private final Set<String> favorites = new HashSet<>();
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final ExecutorService iconThreads = Executors.newFixedThreadPool(2);
+    private final LruCache<String,Bitmap> iconCache = new LruCache<>(64);
+    private final Runnable hideTask = () -> hideControls();
+    private SharedPreferences prefs;
+    private FrameLayout root, controls, shade;
+    private LinearLayout drawer, header;
+    private PlayerView videoView;
     private ExoPlayer player;
-    private SharedPreferences preferences;
-    private LinearLayout screen, rows, controls;
-    private ScrollView scroll;
-    private TextView status, allTab, favoriteTab;
-    private FrameLayout videoHolder;
-    private int videoHeight, current=-1;
-    private boolean favoritesOnly=false, menuVisible=true;
+    private TextView channelTitle, channelSubtitle, message, favoriteButton, allTab, favTab, countLabel;
+    private TextView emptyText;
+    private EditText search;
+    private ListView channelList;
+    private ChannelAdapter adapter;
+    private int current = -1;
+    private boolean controlsVisible = true, drawerOpen = false, favoritesOnly = false, loading = false;
+    private String query = "";
 
-    @Override public void onCreate(Bundle state) {
-        super.onCreate(state);
-        getWindow().setStatusBarColor(BG);
-        getWindow().setNavigationBarColor(BG);
-        getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        preferences=getSharedPreferences("rf_tv",MODE_PRIVATE);
-        favorites.addAll(preferences.getStringSet("favorites",new HashSet<>()));
-        buildScreen();
-        player=new ExoPlayer.Builder(this).build();
-        ((PlayerView)videoHolder.getChildAt(0)).setPlayer(player);
+    @Override public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        getWindow().getDecorView().setSystemUiVisibility(
+            View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+        );
+        prefs = getSharedPreferences("rf_tv", MODE_PRIVATE);
+        favorites.addAll(prefs.getStringSet("favorites", new HashSet<>()));
+        createUi();
+        player = new ExoPlayer.Builder(this).build();
+        videoView.setPlayer(player);
         player.addListener(new Player.Listener() {
             @Override public void onPlaybackStateChanged(int state) {
-                if(current<0 || current>=channels.size())return;
-                if(state==Player.STATE_BUFFERING)notice("Подключение: "+channels.get(current).name);
-                if(state==Player.STATE_READY)notice("● ПРЯМОЙ ЭФИР — "+channels.get(current).name);
+                if(current < 0 || current >= channels.size()) return;
+                if(state == Player.STATE_BUFFERING) setMessage("Подключаемся к эфиру…");
+                if(state == Player.STATE_READY) setMessage(null);
             }
-            @Override public void onPlayerError(PlaybackException error) {
-                notice("Канал не работает или недоступен в вашей стране. Выберите другой.");
+            @Override public void onPlayerError(PlaybackException exception) {
+                setMessage("Эфир недоступен. Попробуйте другой канал.");
+                showControls();
             }
         });
-        fetchChannels();
+        loadChannels();
     }
 
-    private void buildScreen() {
-        int width=getResources().getDisplayMetrics().widthPixels;
-        int height=getResources().getDisplayMetrics().heightPixels;
-        videoHeight=Math.min(height/2, width*9/16);
-        screen=new LinearLayout(this);
-        screen.setOrientation(LinearLayout.VERTICAL);
-        screen.setBackgroundColor(BG);
-        setContentView(screen);
+    private void createUi() {
+        root = new FrameLayout(this);
+        root.setBackgroundColor(Color.BLACK);
+        setContentView(root);
 
-        LinearLayout header=new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setPadding(dp(14),dp(10),dp(12),dp(10));
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView brand=label("РФ ТВ   ●   РОССИЙСКИЕ КАНАЛЫ",19,Color.WHITE);
-        header.addView(brand,new LinearLayout.LayoutParams(0,-2,1));
-        TextView update=button("↻");
-        update.setOnClickListener(v->fetchChannels());
-        header.addView(update);
-        screen.addView(header,new LinearLayout.LayoutParams(-1,-2));
+        videoView = new PlayerView(this);
+        videoView.setUseController(false);
+        videoView.setKeepScreenOn(true);
+        root.addView(videoView, new FrameLayout.LayoutParams(-1, -1));
 
-        videoHolder=new FrameLayout(this);
-        videoHolder.setBackgroundColor(Color.BLACK);
-        PlayerView video=new PlayerView(this);
-        video.setUseController(false);
-        videoHolder.addView(video,new FrameLayout.LayoutParams(-1,-1));
-        screen.addView(videoHolder,new LinearLayout.LayoutParams(-1,videoHeight));
+        View touchSurface = new View(this);
+        touchSurface.setClickable(true);
+        touchSurface.setOnClickListener(v -> {
+            if(drawerOpen) closeDrawer();
+            else if(controlsVisible) hideControls();
+            else showControls();
+        });
+        root.addView(touchSurface, new FrameLayout.LayoutParams(-1, -1));
 
-        status=label("Подключаем список каналов…",14,0xffaec3d9);
-        status.setGravity(Gravity.CENTER);
-        status.setPadding(dp(12),dp(10),dp(12),dp(10));
-        screen.addView(status,new LinearLayout.LayoutParams(-1,-2));
+        message = text("Загружаем российские телеканалы…", 17, WHITE, true);
+        message.setGravity(Gravity.CENTER);
+        message.setPadding(dp(24), dp(20), dp(24), dp(20));
+        message.setBackground(rounded(0xbb0a111b, 16));
+        FrameLayout.LayoutParams m = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER);
+        m.leftMargin = dp(20);
+        m.rightMargin = dp(20);
+        root.addView(message, m);
 
-        controls=new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        controls.setPadding(dp(12),dp(5),dp(12),dp(8));
-        TextView previous=button("◀ НАЗАД");
-        TextView toggle=button("☰ КАНАЛЫ");
-        TextView next=button("ВПЕРЁД ▶");
-        controls.addView(previous,new LinearLayout.LayoutParams(0,dp(49),1));
-        controls.addView(toggle,new LinearLayout.LayoutParams(0,dp(49),1));
-        controls.addView(next,new LinearLayout.LayoutParams(0,dp(49),1));
-        previous.setOnClickListener(v->move(-1));
-        toggle.setOnClickListener(v->showMenu(!menuVisible));
-        next.setOnClickListener(v->move(1));
-        screen.addView(controls,new LinearLayout.LayoutParams(-1,-2));
+        controls = new FrameLayout(this);
+        root.addView(controls, new FrameLayout.LayoutParams(-1, -1));
+        createOverlay();
 
-        LinearLayout tabs=new LinearLayout(this);
-        tabs.setPadding(dp(12),dp(3),dp(12),dp(3));
-        allTab=button("ВСЕ КАНАЛЫ");
-        favoriteTab=button("★ ИЗБРАННОЕ");
-        tabs.addView(allTab,new LinearLayout.LayoutParams(0,dp(45),1));
-        tabs.addView(favoriteTab,new LinearLayout.LayoutParams(0,dp(45),1));
-        allTab.setOnClickListener(v->{ favoritesOnly=false; renderRows(); });
-        favoriteTab.setOnClickListener(v->{ favoritesOnly=true; renderRows(); });
-        screen.addView(tabs);
+        shade = new FrameLayout(this);
+        shade.setVisibility(View.GONE);
+        shade.setBackgroundColor(0x99000000);
+        shade.setOnClickListener(v -> closeDrawer());
+        root.addView(shade, new FrameLayout.LayoutParams(-1, -1));
 
-        scroll=new ScrollView(this);
-        scroll.setFillViewport(false);
-        rows=new LinearLayout(this);
-        rows.setOrientation(LinearLayout.VERTICAL);
-        rows.setPadding(dp(12),dp(2),dp(12),dp(16));
-        scroll.addView(rows);
-        screen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
-        renderRows();
+        createDrawer();
+        scheduleHide();
     }
 
-    private TextView label(String name,int size,int color) {
-        TextView view=new TextView(this);
-        view.setText(name);
-        view.setTextColor(color);
-        view.setTextSize(size);
-        view.setTypeface(Typeface.create("sans-serif",Typeface.BOLD));
-        view.setGravity(Gravity.CENTER_VERTICAL);
-        return view;
+    private void createOverlay() {
+        LinearLayout titleBox = new LinearLayout(this);
+        titleBox.setOrientation(LinearLayout.VERTICAL);
+        titleBox.setPadding(dp(17), dp(11), dp(19), dp(11));
+        titleBox.setBackground(rounded(0x990c1420, 14));
+        channelTitle = text("РФ ТВ", 23, WHITE, true);
+        channelTitle.setSingleLine(true);
+        channelTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        channelSubtitle = text("● ПРЯМОЙ ЭФИР  ·  IPTV", 12, DIM, false);
+        titleBox.addView(channelTitle, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout.LayoutParams sub = new LinearLayout.LayoutParams(-1, -2);
+        sub.topMargin = dp(5);
+        titleBox.addView(channelSubtitle, sub);
+        FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
+        titleParams.leftMargin = dp(18);
+        titleParams.topMargin = dp(24);
+        titleParams.rightMargin = dp(18);
+        controls.addView(titleBox, titleParams);
+
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.HORIZONTAL);
+        bottom.setGravity(Gravity.CENTER);
+        bottom.setPadding(dp(12), dp(6), dp(12), dp(6));
+        bottom.setBackground(rounded(0xbb0c1119, 22));
+
+        TextView previous = overlayButton("◀", "Предыдущий канал");
+        TextView menu = overlayButton("☰", "Список каналов");
+        favoriteButton = overlayButton("☆", "Добавить в избранное");
+        TextView next = overlayButton("▶", "Следующий канал");
+        previous.setOnClickListener(v -> move(-1));
+        menu.setOnClickListener(v -> openDrawer());
+        favoriteButton.setOnClickListener(v -> {
+            if(current >= 0 && current < channels.size()) toggleFavorite(channels.get(current));
+            showControls();
+        });
+        next.setOnClickListener(v -> move(1));
+        for(TextView b : new TextView[]{previous, menu, favoriteButton, next}) {
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(62), dp(56));
+            bp.leftMargin = dp(4);
+            bp.rightMargin = dp(4);
+            bottom.addView(b, bp);
+        }
+        FrameLayout.LayoutParams barParams = new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        barParams.bottomMargin = dp(22);
+        controls.addView(bottom, barParams);
     }
 
-    private TextView button(String title) {
-        TextView b=label(title,13,Color.WHITE);
+    private TextView overlayButton(String symbol, String description) {
+        TextView b = text(symbol, 31, WHITE, false);
         b.setGravity(Gravity.CENTER);
+        b.setContentDescription(description);
         b.setFocusable(true);
         b.setClickable(true);
-        b.setPadding(dp(8),dp(8),dp(8),dp(8));
-        b.setBackground(shape(PANEL));
-        b.setOnFocusChangeListener((v,focused)->b.setBackground(shape(focused?ACCENT:PANEL)));
+        b.setBackground(rounded(0x001c2738, 14));
+        b.setOnFocusChangeListener((v, focused) -> b.setBackground(rounded(focused ? 0xff385677 : 0x001c2738, 14)));
         return b;
     }
 
-    private GradientDrawable shape(int color) {
-        GradientDrawable bg=new GradientDrawable();
-        bg.setColor(color);
-        bg.setCornerRadius(dp(9));
-        return bg;
+    private void createDrawer() {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        int width = metrics.widthPixels > metrics.heightPixels
+            ? Math.min((int)(metrics.widthPixels * .52f), dp(490))
+            : Math.min((int)(metrics.widthPixels * .92f), dp(490));
+
+        drawer = new LinearLayout(this);
+        drawer.setOrientation(LinearLayout.VERTICAL);
+        drawer.setBackgroundColor(0xf2101722);
+        drawer.setVisibility(View.GONE);
+        drawer.setElevation(dp(14));
+        FrameLayout.LayoutParams drawerParams = new FrameLayout.LayoutParams(width, -1, Gravity.LEFT);
+        root.addView(drawer, drawerParams);
+
+        header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(18), dp(24), dp(15), dp(14));
+        TextView heading = text("Телеканалы", 23, WHITE, true);
+        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView close = text("×", 33, DIM, false);
+        close.setGravity(Gravity.CENTER);
+        close.setContentDescription("Закрыть список");
+        close.setFocusable(true);
+        close.setClickable(true);
+        close.setOnClickListener(v -> closeDrawer());
+        header.addView(close, new LinearLayout.LayoutParams(dp(52), dp(44)));
+        drawer.addView(header);
+
+        LinearLayout searchRow = new LinearLayout(this);
+        searchRow.setOrientation(LinearLayout.HORIZONTAL);
+        searchRow.setGravity(Gravity.CENTER_VERTICAL);
+        searchRow.setBackground(rounded(0xff283444, 12));
+        searchRow.setPadding(dp(14), dp(1), dp(9), dp(1));
+        TextView searchIcon = text("⌕", 27, DIM, false);
+        searchRow.addView(searchIcon, new LinearLayout.LayoutParams(dp(34), dp(48)));
+        search = new EditText(this);
+        search.setSingleLine(true);
+        search.setTextColor(WHITE);
+        search.setHintTextColor(0xff9baabc);
+        search.setTextSize(16);
+        search.setHint("Найти канал");
+        search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH);
+        search.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        search.setBackgroundColor(Color.TRANSPARENT);
+        searchRow.addView(search, new LinearLayout.LayoutParams(0, dp(52), 1));
+        TextView clear = text("×", 24, DIM, false);
+        clear.setGravity(Gravity.CENTER);
+        clear.setOnClickListener(v -> search.setText(""));
+        clear.setFocusable(true);
+        searchRow.addView(clear, new LinearLayout.LayoutParams(dp(38), dp(48)));
+        LinearLayout.LayoutParams searchParams = new LinearLayout.LayoutParams(-1, -2);
+        searchParams.leftMargin = dp(16);
+        searchParams.rightMargin = dp(16);
+        drawer.addView(searchRow, searchParams);
+        search.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {
+                query = s.toString().trim().toLowerCase(Locale.ROOT);
+                filterChannels();
+            }
+            @Override public void afterTextChanged(Editable e) {}
+        });
+
+        LinearLayout tabs = new LinearLayout(this);
+        tabs.setPadding(dp(12), dp(13), dp(12), dp(7));
+        tabs.setGravity(Gravity.CENTER_VERTICAL);
+        allTab = tab("Все каналы");
+        favTab = tab("★ Избранное");
+        tabs.addView(allTab, new LinearLayout.LayoutParams(0, dp(46), 1));
+        tabs.addView(favTab, new LinearLayout.LayoutParams(0, dp(46), 1));
+        allTab.setOnClickListener(v -> { favoritesOnly=false; filterChannels(); });
+        favTab.setOnClickListener(v -> { favoritesOnly=true; filterChannels(); });
+        drawer.addView(tabs);
+
+        FrameLayout listArea = new FrameLayout(this);
+        adapter = new ChannelAdapter();
+        channelList = new ListView(this);
+        channelList.setAdapter(adapter);
+        channelList.setDivider(null);
+        channelList.setDividerHeight(0);
+        channelList.setCacheColorHint(Color.TRANSPARENT);
+        channelList.setBackgroundColor(Color.TRANSPARENT);
+        channelList.setVerticalScrollBarEnabled(false);
+        channelList.setDescendantFocusability(ViewGroup.FOCUS_AFTER_DESCENDANTS);
+        listArea.addView(channelList, new FrameLayout.LayoutParams(-1, -1));
+
+        emptyText = text("Каналы не найдены", 15, DIM, false);
+        emptyText.setGravity(Gravity.CENTER);
+        emptyText.setPadding(dp(14), dp(22), dp(14), dp(22));
+        listArea.addView(emptyText, new FrameLayout.LayoutParams(-1, -1));
+        channelList.setEmptyView(emptyText);
+        drawer.addView(listArea, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        countLabel = text("Загрузка списка…", 12, 0xff94a4b9, false);
+        countLabel.setPadding(dp(20), dp(13), dp(15), dp(20));
+        drawer.addView(countLabel);
+        filterChannels();
     }
 
-    private int dp(int n) {return Math.round(n*getResources().getDisplayMetrics().density);}
+    private TextView tab(String label) {
+        TextView view = text(label, 15, DIM, true);
+        view.setGravity(Gravity.CENTER);
+        view.setFocusable(true);
+        view.setClickable(true);
+        view.setBackground(rounded(0xff1a2636, 10));
+        return view;
+    }
 
-    private void renderRows() {
-        if(rows==null)return;
-        rows.removeAllViews();
-        allTab.setTextColor(favoritesOnly?0xff9cb0c4:ACCENT);
-        favoriteTab.setTextColor(favoritesOnly?ACCENT:0xff9cb0c4);
-        int shown=0;
-        for(int i=0;i<channels.size();i++) {
-            Channel c=channels.get(i);
-            if(favoritesOnly&&!favorites.contains(c.key()))continue;
-            final int index=i;
-            LinearLayout line=new LinearLayout(this);
-            line.setOrientation(LinearLayout.HORIZONTAL);
-            line.setGravity(Gravity.CENTER_VERTICAL);
-            line.setPadding(dp(12),dp(5),dp(6),dp(5));
-            line.setBackground(shape(i==current?0xff20405d:PANEL));
-            TextView name=label((i+1)+".  "+c.name,15,Color.WHITE);
-            name.setPadding(dp(4),dp(11),dp(4),dp(11));
-            name.setFocusable(true);
-            name.setClickable(true);
-            name.setOnClickListener(v->play(index));
-            name.setOnLongClickListener(v->{favorite(c);return true;});
-            name.setOnFocusChangeListener((v,focused)->name.setTextColor(focused?ACCENT:Color.WHITE));
-            line.addView(name,new LinearLayout.LayoutParams(0,-2,1));
-            TextView star=button(favorites.contains(c.key())?"★":"☆");
-            star.setTextSize(21);
-            star.setTextColor(favorites.contains(c.key())?0xffffd36a:0xff9eb4ca);
-            star.setOnClickListener(v->favorite(c));
-            line.addView(star,new LinearLayout.LayoutParams(dp(50),dp(45)));
-            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);
-            lp.bottomMargin=dp(5);
-            rows.addView(line,lp);
-            shown++;
+    private TextView text(String value, int size, int color, boolean bold) {
+        TextView t = new TextView(this);
+        t.setText(value);
+        t.setTextSize(size);
+        t.setTextColor(color);
+        t.setTypeface(Typeface.create("sans-serif", bold ? Typeface.BOLD : Typeface.NORMAL));
+        t.setGravity(Gravity.CENTER_VERTICAL);
+        return t;
+    }
+
+    private GradientDrawable rounded(int color, int radius) {
+        GradientDrawable drawable = new GradientDrawable();
+        drawable.setColor(color);
+        drawable.setCornerRadius(dp(radius));
+        return drawable;
+    }
+
+    private int dp(float v) { return (int)(v * getResources().getDisplayMetrics().density + .5f); }
+
+    private void showControls() {
+        if(drawerOpen) return;
+        handler.removeCallbacks(hideTask);
+        controls.animate().cancel();
+        controls.setVisibility(View.VISIBLE);
+        controls.setAlpha(1f);
+        controlsVisible = true;
+        scheduleHide();
+    }
+
+    private void hideControls() {
+        if(drawerOpen) return;
+        handler.removeCallbacks(hideTask);
+        if(!controlsVisible) return;
+        controlsVisible = false;
+        controls.animate().alpha(0f).setDuration(230).withEndAction(() -> {
+            if(!controlsVisible && !drawerOpen) controls.setVisibility(View.GONE);
+        }).start();
+    }
+
+    private void scheduleHide() {
+        handler.removeCallbacks(hideTask);
+        if(!drawerOpen && controlsVisible) handler.postDelayed(hideTask, AUTO_HIDE_MS);
+    }
+
+    private void openDrawer() {
+        handler.removeCallbacks(hideTask);
+        controls.animate().cancel();
+        controls.setVisibility(View.GONE);
+        controlsVisible = false;
+        drawerOpen = true;
+        shade.setVisibility(View.VISIBLE);
+        drawer.setVisibility(View.VISIBLE);
+        drawer.setTranslationX(-drawer.getLayoutParams().width);
+        drawer.animate().translationX(0f).setDuration(200).start();
+        filterChannels();
+        if(current >= 0 && query.isEmpty() && !favoritesOnly) {
+            int position = shown.indexOf(current);
+            if(position >= 0) channelList.setSelection(position);
         }
-        if(shown==0) {
-            TextView empty=label(channels.isEmpty()?"Загружаем каналы…":"Здесь пока нет избранных каналов",15,0xffb1c1d4);
-            empty.setPadding(dp(12),dp(26),0,0);
-            rows.addView(empty);
+        channelList.requestFocus();
+    }
+
+    private void closeDrawer() {
+        if(!drawerOpen) return;
+        drawerOpen = false;
+        ((InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE))
+            .hideSoftInputFromWindow(search.getWindowToken(), 0);
+        search.clearFocus();
+        drawer.animate().cancel();
+        drawer.setTranslationX(0f);
+        drawer.setVisibility(View.GONE);
+        shade.setVisibility(View.GONE);
+        showControls();
+    }
+
+    private void setMessage(String value) {
+        if(message == null) return;
+        message.setVisibility(value == null ? View.GONE : View.VISIBLE);
+        if(value != null) message.setText(value);
+    }
+
+    private int positionOf(Channel channel) {
+        for(int i=0;i<channels.size();i++) if(channels.get(i) == channel) return i;
+        return -1;
+    }
+
+    private void filterChannels() {
+        if(adapter == null) return;
+        shown.clear();
+        for(int i=0; i<channels.size(); i++) {
+            Channel c = channels.get(i);
+            if(favoritesOnly && !favorites.contains(c.key())) continue;
+            if(!query.isEmpty() && !c.name.toLowerCase(Locale.ROOT).contains(query)) continue;
+            shown.add(i);
         }
+        allTab.setTextColor(favoritesOnly ? DIM : BLUE);
+        favTab.setTextColor(favoritesOnly ? BLUE : DIM);
+        allTab.setBackground(rounded(favoritesOnly ? 0xff1a2636 : 0xff294967, 10));
+        favTab.setBackground(rounded(favoritesOnly ? 0xff294967 : 0xff1a2636, 10));
+        adapter.notifyDataSetChanged();
+        if(countLabel != null) countLabel.setText("Найдено: "+shown.size()+"  ·  Всего: "+channels.size());
     }
 
-    private void favorite(Channel channel) {
-        if(!favorites.add(channel.key()))favorites.remove(channel.key());
-        preferences.edit().putStringSet("favorites",new HashSet<>(favorites)).apply();
-        renderRows();
+    private void toggleFavorite(Channel channel) {
+        if(!favorites.add(channel.key())) favorites.remove(channel.key());
+        prefs.edit().putStringSet("favorites", new HashSet<>(favorites)).apply();
+        updateCurrent();
+        filterChannels();
     }
 
-    private void showMenu(boolean show) {
-        menuVisible=show;
-        scroll.setVisibility(show?View.VISIBLE:View.GONE);
-        allTab.setVisibility(show?View.VISIBLE:View.GONE);
-        favoriteTab.setVisibility(show?View.VISIBLE:View.GONE);
-        screen.requestLayout();
-        videoHolder.setLayoutParams(show?
-            new LinearLayout.LayoutParams(-1,videoHeight):
-            new LinearLayout.LayoutParams(-1,0,1));
+    private void updateCurrent() {
+        if(current < 0 || current >= channels.size()) {
+            channelTitle.setText("РФ ТВ");
+            channelSubtitle.setText("● ПРЯМОЙ ЭФИР  ·  IPTV");
+            favoriteButton.setText("☆");
+            return;
+        }
+        Channel c = channels.get(current);
+        channelTitle.setText(c.name);
+        channelSubtitle.setText("● ПРЯМОЙ ЭФИР  ·  IPTV");
+        favoriteButton.setText(favorites.contains(c.key()) ? "★" : "☆");
+        favoriteButton.setTextColor(favorites.contains(c.key()) ? YELLOW : WHITE);
     }
-
-    private void notice(String s) {if(status!=null)status.setText(s);}
 
     private void play(int index) {
-        if(index<0 || index>=channels.size())return;
-        current=index;
-        Channel c=channels.get(index);
-        preferences.edit().putString("last",c.url).apply();
+        if(index < 0 || index >= channels.size()) return;
+        current = index;
+        Channel c = channels.get(index);
+        prefs.edit().putString("last", c.url).apply();
         player.setMediaItem(MediaItem.fromUri(c.url));
         player.prepare();
         player.play();
-        notice("Подключение: "+c.name);
-        renderRows();
-        showMenu(false);
+        updateCurrent();
+        setMessage("Подключаемся к эфиру…");
+        adapter.notifyDataSetChanged();
+        if(drawerOpen) closeDrawer();
+        else showControls();
     }
 
     private void move(int delta) {
-        if(channels.isEmpty())return;
-        play((current<0?0:(current+delta+channels.size())%channels.size()));
+        if(channels.isEmpty()) { openDrawer(); return; }
+        int next = current < 0 ? 0 : (current + delta + channels.size()) % channels.size();
+        play(next);
     }
 
-    private void fetchChannels() {
-        notice("Загружаем российские каналы…");
-        new Thread(()->{
-            String content=null;
-            boolean usedCache=false;
+    private int channelRank(String name) {
+        String n = name.toLowerCase(Locale.ROOT).trim();
+        if(n.equals("первый канал") || n.equals("1tv") || n.equals("channel one")) return 0;
+        if(n.equals("россия 1") || n.equals("russia 1")) return 1;
+        if(n.equals("нтв") || n.equals("ntv")) return 2;
+        if(n.equals("тнт") || n.equals("tnt")) return 3;
+        if(n.equals("стс") || n.equals("sts")) return 4;
+        if(n.equals("пятый канал") || n.equals("5 канал")) return 5;
+        return 100;
+    }
+
+    private void loadChannels() {
+        if(loading) return;
+        loading = true;
+        if(channels.isEmpty()) setMessage("Загружаем российские телеканалы…");
+        new Thread(() -> {
+            String content = null;
+            boolean cached = false;
             try {
-                HttpURLConnection conn=(HttpURLConnection)new URL(SOURCE).openConnection();
-                conn.setConnectTimeout(12000);
-                conn.setReadTimeout(15000);
-                conn.setRequestProperty("User-Agent","RF-TV/1.1");
+                HttpURLConnection connection = (HttpURLConnection)new URL(SOURCE).openConnection();
+                connection.setConnectTimeout(12000);
+                connection.setReadTimeout(16000);
+                connection.setRequestProperty("User-Agent", "RF-TV/2.0");
                 try {
-                    if(conn.getResponseCode()!=200)throw new Exception("HTTP "+conn.getResponseCode());
-                    ByteArrayOutputStream buffer=new ByteArrayOutputStream();
-                    try(InputStream input=conn.getInputStream()) {
-                        byte[] block=new byte[8192]; int len;
-                        while((len=input.read(block))!=-1) {
-                            buffer.write(block,0,len);
-                            if(buffer.size()>2000000)throw new Exception("List too big");
+                    if(connection.getResponseCode() != 200) throw new Exception("HTTP "+connection.getResponseCode());
+                    ByteArrayOutputStream output = new ByteArrayOutputStream();
+                    try(InputStream in = connection.getInputStream()) {
+                        byte[] b = new byte[8192]; int n;
+                        while((n = in.read(b)) != -1) {
+                            output.write(b, 0, n);
+                            if(output.size() > 2000000) throw new Exception("Playlist too large");
                         }
                     }
-                    content=buffer.toString("UTF-8");
-                    if(PlaylistParser.parse(content).isEmpty())throw new Exception("Empty channel list");
-                    try(FileOutputStream out=openFileOutput("channels.m3u",MODE_PRIVATE)) {
+                    content = output.toString("UTF-8");
+                    if(PlaylistParser.parse(content).isEmpty()) throw new Exception("No channels");
+                    try(FileOutputStream out = openFileOutput("channels.m3u", MODE_PRIVATE)) {
                         out.write(content.getBytes(StandardCharsets.UTF_8));
                     }
-                } finally {conn.disconnect();}
-            } catch(Exception e) {
-                usedCache=true;
-                try(FileInputStream in=openFileInput("channels.m3u"); ByteArrayOutputStream data=new ByteArrayOutputStream()) {
-                    byte[] block=new byte[8192]; int len;
-                    while((len=in.read(block))!=-1)data.write(block,0,len);
-                    content=data.toString("UTF-8");
-                } catch(Exception ignored){}
+                } finally { connection.disconnect(); }
+            } catch(Exception exception) {
+                cached = true;
+                try(FileInputStream in = openFileInput("channels.m3u");
+                    ByteArrayOutputStream data = new ByteArrayOutputStream()) {
+                    byte[] buffer = new byte[8192]; int length;
+                    while((length = in.read(buffer)) != -1) data.write(buffer, 0, length);
+                    content = data.toString("UTF-8");
+                } catch(Exception ignored) {}
             }
-            List<Channel> found=PlaylistParser.parse(content);
-            found.sort(Comparator.comparing((Channel c)->c.name.toLowerCase(Locale.ROOT)));
-            final boolean cached=usedCache;
-            runOnUiThread(()->{
-                if(isFinishing()||isDestroyed())return;
-                String previous=current>=0&&current<channels.size()?
-                    channels.get(current).url:preferences.getString("last","");
+            List<Channel> result = PlaylistParser.parse(content);
+            result.sort(Comparator.comparingInt((Channel c) -> channelRank(c.name))
+                .thenComparing(c -> c.name.toLowerCase(Locale.ROOT)));
+            boolean useCache = cached;
+            runOnUiThread(() -> {
+                if(isFinishing() || isDestroyed()) return;
+                loading = false;
+                String oldUrl = current >= 0 && current < channels.size()
+                    ? channels.get(current).url : prefs.getString("last", "");
                 channels.clear();
-                channels.addAll(found);
-                current=-1;
-                for(int i=0;i<channels.size();i++)if(channels.get(i).url.equals(previous)){current=i;break;}
-                renderRows();
-                if(channels.isEmpty())notice("Не удалось загрузить каналы. Проверьте интернет и нажмите ↻.");
-                else notice("Каналов: "+channels.size()+(cached?" (из сохранённого списка)":"")+" — выберите канал");
+                channels.addAll(result);
+                int found = -1;
+                for(int i=0;i<channels.size();i++) {
+                    if(channels.get(i).url.equals(oldUrl)) { found=i; break; }
+                }
+                boolean playing = current >= 0 && player.getMediaItemCount() > 0;
+                current = found;
+                filterChannels();
+                updateCurrent();
+                if(channels.isEmpty()) {
+                    setMessage("Не удалось загрузить каналы. Проверьте подключение.");
+                    showControls();
+                    return;
+                }
+                if(!playing) play(found >= 0 ? found : 0);
+                else {
+                    if(current < 0) current = 0;
+                    setMessage(null);
+                    updateCurrent();
+                    if(useCache) showControls();
+                }
             });
         }).start();
     }
 
-    @Override public boolean onKeyDown(int key,KeyEvent event) {
-        if(key==KeyEvent.KEYCODE_CHANNEL_UP||key==KeyEvent.KEYCODE_MEDIA_NEXT){move(1);return true;}
-        if(key==KeyEvent.KEYCODE_CHANNEL_DOWN||key==KeyEvent.KEYCODE_MEDIA_PREVIOUS){move(-1);return true;}
-        if(!menuVisible&&(key==KeyEvent.KEYCODE_DPAD_CENTER||key==KeyEvent.KEYCODE_MENU)) {
-            showMenu(true);return true;
+    private class ChannelAdapter extends BaseAdapter {
+        @Override public int getCount() { return shown.size(); }
+        @Override public Object getItem(int p) { return channels.get(shown.get(p)); }
+        @Override public long getItemId(int p) { return shown.get(p); }
+
+        @Override public View getView(int p, View convertView, ViewGroup parent) {
+            Channel c = channels.get(shown.get(p));
+            LinearLayout row = new LinearLayout(MainActivity.this);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setPadding(dp(12), dp(4), dp(5), dp(4));
+            row.setMinimumHeight(dp(67));
+            row.setBackground(rounded(shown.get(p) == current ? 0xff324b63 : 0x00192634, 11));
+            row.setFocusable(true);
+            row.setClickable(true);
+            row.setOnClickListener(v -> play(positionOf(c)));
+            row.setOnFocusChangeListener((v, focused) -> row.setBackground(
+                rounded(focused ? 0xff3d607f : (positionOf(c) == current ? 0xff324b63 : 0x00192634), 11)
+            ));
+
+            TextView number = text(Integer.toString(shown.get(p)+1), 13, 0xff93a4b9, false);
+            number.setGravity(Gravity.CENTER);
+            row.addView(number, new LinearLayout.LayoutParams(dp(30), dp(50)));
+
+            FrameLayout icon = new FrameLayout(MainActivity.this);
+            TextView placeholder = text(c.name.isEmpty() ? "TV" : c.name.substring(0, 1).toUpperCase(Locale.ROOT), 22, WHITE, true);
+            placeholder.setGravity(Gravity.CENTER);
+            placeholder.setBackground(rounded(0xff34475a, 8));
+            icon.addView(placeholder, new FrameLayout.LayoutParams(dp(43), dp(43), Gravity.CENTER));
+            ImageView logo = new ImageView(MainActivity.this);
+            logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            icon.addView(logo, new FrameLayout.LayoutParams(dp(43), dp(43), Gravity.CENTER));
+            row.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(49)));
+            fetchLogo(c.logo, logo, placeholder);
+
+            TextView name = text(c.name, 15, WHITE, false);
+            name.setSingleLine(true);
+            name.setEllipsize(android.text.TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1f);
+            nameParams.leftMargin = dp(12);
+            row.addView(name, nameParams);
+
+            TextView star = text(favorites.contains(c.key()) ? "★" : "☆", 25,
+                favorites.contains(c.key()) ? YELLOW : DIM, false);
+            star.setContentDescription("Добавить или удалить из избранного");
+            star.setGravity(Gravity.CENTER);
+            star.setFocusable(true);
+            star.setClickable(true);
+            star.setOnClickListener(v -> toggleFavorite(c));
+            row.addView(star, new LinearLayout.LayoutParams(dp(44), dp(52)));
+            LinearLayout wrap = new LinearLayout(MainActivity.this);
+            wrap.setOrientation(LinearLayout.VERTICAL);
+            wrap.setPadding(dp(11), dp(2), dp(11), dp(2));
+            wrap.addView(row, new LinearLayout.LayoutParams(-1, -2));
+            return wrap;
         }
-        return super.onKeyDown(key,event);
     }
+
+    private void fetchLogo(String url, ImageView view, TextView placeholder) {
+        view.setImageDrawable(null);
+        if(url == null || !(url.startsWith("https://") || url.startsWith("http://"))) return;
+        view.setTag(url);
+        Bitmap hit = iconCache.get(url);
+        if(hit != null) {
+            view.setImageBitmap(hit);
+            placeholder.setVisibility(View.INVISIBLE);
+            return;
+        }
+        iconThreads.execute(() -> {
+            Bitmap image = null;
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection)new URL(url).openConnection();
+                connection.setConnectTimeout(4500);
+                connection.setReadTimeout(4500);
+                connection.setRequestProperty("User-Agent", "RF-TV/2.0");
+                if(connection.getResponseCode() != 200) return;
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                try(InputStream in = connection.getInputStream()) {
+                    byte[] bytes = new byte[4096]; int n;
+                    while((n = in.read(bytes)) != -1) {
+                        output.write(bytes,0,n);
+                        if(output.size() > 250000) return;
+                    }
+                }
+                byte[] data = output.toByteArray();
+                BitmapFactory.Options opts = new BitmapFactory.Options();
+                opts.inJustDecodeBounds = true;
+                BitmapFactory.decodeByteArray(data,0,data.length,opts);
+                int sample = 1;
+                while(opts.outWidth / sample > 120 || opts.outHeight / sample > 120) sample *= 2;
+                opts.inJustDecodeBounds = false;
+                opts.inSampleSize = sample;
+                image = BitmapFactory.decodeByteArray(data,0,data.length,opts);
+                if(image != null) iconCache.put(url,image);
+            } catch(Exception ignored) {}
+            finally { if(connection != null) connection.disconnect(); }
+            Bitmap result = image;
+            if(result != null) runOnUiThread(() -> {
+                if(url.equals(view.getTag())) {
+                    view.setImageBitmap(result);
+                    placeholder.setVisibility(View.INVISIBLE);
+                }
+            });
+        });
+    }
+
+    @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if(drawerOpen) return super.onKeyDown(keyCode,event);
+        if(keyCode == KeyEvent.KEYCODE_CHANNEL_UP || keyCode == KeyEvent.KEYCODE_MEDIA_NEXT ||
+           (!controlsVisible && keyCode == KeyEvent.KEYCODE_DPAD_UP)) {
+            move(1); return true;
+        }
+        if(keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN || keyCode == KeyEvent.KEYCODE_MEDIA_PREVIOUS ||
+           (!controlsVisible && keyCode == KeyEvent.KEYCODE_DPAD_DOWN)) {
+            move(-1); return true;
+        }
+        if(keyCode == KeyEvent.KEYCODE_MENU) { openDrawer(); return true; }
+        if(keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+            if(!controlsVisible) { showControls(); return true; }
+        }
+        return super.onKeyDown(keyCode,event);
+    }
+
     @Override public void onBackPressed() {
-        if(!menuVisible)showMenu(true);
-        else if(current>=0)showMenu(false);
-        else super.onBackPressed();
+        if(drawerOpen) { closeDrawer(); return; }
+        if(controlsVisible) { hideControls(); return; }
+        super.onBackPressed();
     }
+
     @Override protected void onStop() {
-        super.onStop(); if(player!=null)player.pause();
+        super.onStop();
+        if(player != null) player.pause();
     }
+
     @Override protected void onDestroy() {
-        if(player!=null)player.release();
+        handler.removeCallbacksAndMessages(null);
+        iconThreads.shutdownNow();
+        if(player != null) player.release();
         super.onDestroy();
     }
 }
