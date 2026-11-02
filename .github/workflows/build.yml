@@ -8,7 +8,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,3 +35,18 @@ jobs:
           name: RF-TV-Android-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           retention-days: 14
+      - name: Prepare direct-download APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk RF-TV-2.1.apk
+      - name: Publish Android APK to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.1.0
+          name: РФ ТВ 2.1 — тестовая версия
+          target_commitish: ${{ github.sha }}
+          prerelease: true
+          draft: false
+          files: RF-TV-2.1.apk
+          body: |
+            Тестовая версия РФ ТВ 2.1 для телефона Android и Android TV.
+            Скачать: RF-TV-2.1.apk (ниже в Assets).
+            Проверка эфиров зависит от страны и доступных источников.
