@@ -87,7 +87,7 @@ public final class ChannelCatalog {
             for (Channel candidate : matches) {
                 if (addresses.add(candidate.url)) {
                     grouped.sources.add(candidate.url);
-                    if (grouped.sources.size() >= 8) break;
+                    if (grouped.sources.size() >= 5) break;
                 }
             }
             result.add(grouped);
