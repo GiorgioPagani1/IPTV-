@@ -68,7 +68,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService iconThreads = Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> iconCache = new LruCache<>(64);
     private final Runnable hideTask = () -> hideControls();
-    private final Runnable hideZapping = () -> { if(zappingBadge != null) zappingBadge.setVisibility(View.GONE); };
+    private final Runnable hideZapping = () -> { if(this.zappingBadge != null) this.zappingBadge.setVisibility(View.GONE); };
     private TvGuide tvGuide = new TvGuide();
     private ChannelSettings channelSettings;
     private boolean epgLoading = false, showHidden = false, resumeAfterBackground = false, longPressedOk = false;
