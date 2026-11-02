@@ -32,6 +32,7 @@ public final class TvGuide {
 
     private static final String[][] SOURCES={
         {"EPG.ONE Россия","https://epg.one/ru.xml.gz"},
+        {"EPG.ONE (HTTP)","http://epg.one/ru.xml.gz"},
         {"TeleGuide","https://download.teleguide.su/download/new3/xmltv.xml.gz"},
         {"IPTVX","https://iptvx.one/epg/epg_lite.xml.gz"},
         {"FreeEPG","https://free-epg.de/api/epg/ru.xml.gz"}
@@ -114,7 +115,7 @@ public final class TvGuide {
     }
 
     private static File download(Context ctx,int index,String address,boolean forceRefresh) throws Exception {
-        File cache=new File(ctx.getFilesDir(),"epg_ru_v23_"+index+".xml.gz");
+        File cache=new File(ctx.getFilesDir(),"epg_ru_v24_"+index+".xml.gz");
         if(!forceRefresh && cache.isFile() && cache.length()>100 &&
            System.currentTimeMillis()-cache.lastModified()<CACHE_MS) return cache;
 
