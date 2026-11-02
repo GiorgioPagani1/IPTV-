@@ -68,12 +68,11 @@ public final class MainActivity extends Activity {
     private final ExecutorService iconThreads = Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> iconCache = new LruCache<>(64);
     private final Runnable hideTask = () -> hideControls();
-    private final Runnable hideZapping = () -> { if(this.zappingBadge != null) this.zappingBadge.setVisibility(View.GONE); };
     private TvGuide tvGuide = new TvGuide();
     private ChannelSettings channelSettings;
     private boolean epgLoading = false, showHidden = false, resumeAfterBackground = false, longPressedOk = false;
-    private String previousChannelKey = "";
-    private TextView zappingBadge, programNow, programNext, hiddenTab;
+    private TextView hiddenTab;
+    private GuidePanel guidePanel;
     private final Runnable streamWatchdog = () -> switchSource("Превышено время ожидания");
     private final ArrayList<String> activeSources = new ArrayList<>();
     private SharedPreferences prefs;
@@ -104,7 +103,6 @@ public final class MainActivity extends Activity {
         prefs = getSharedPreferences("rf_tv", MODE_PRIVATE);
         favorites.addAll(prefs.getStringSet("favorites", new HashSet<>()));
         channelSettings = new ChannelSettings(prefs);
-        previousChannelKey = prefs.getString("previous_channel_v22", "");
         createUi();
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
             .setUserAgent("RF-TV/2.2 (Android IPTV Player)")
@@ -131,7 +129,6 @@ public final class MainActivity extends Activity {
                             .remove(badKey(activeSources.get(sourceIndex))).apply();
                     }
                     channelSubtitle.setText("● ПРЯМОЙ ЭФИР   •   " + (sourceIndex+1) + "/" + activeSources.size());
-                    updateProgram();
                 }
             }
             @Override public void onPlayerError(PlaybackException exception) {
@@ -173,15 +170,6 @@ public final class MainActivity extends Activity {
         root.addView(controls, new FrameLayout.LayoutParams(-1, -1));
         createOverlay();
 
-        zappingBadge = text("", 18, WHITE, true);
-        zappingBadge.setGravity(Gravity.CENTER);
-        zappingBadge.setPadding(dp(24),dp(12),dp(24),dp(12));
-        zappingBadge.setBackground(rounded(0xdd101f33,14));
-        zappingBadge.setVisibility(View.GONE);
-        FrameLayout.LayoutParams zb = new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER);
-        zb.leftMargin=dp(20);zb.rightMargin=dp(20);
-        root.addView(zappingBadge,zb);
-
         shade = new FrameLayout(this);
         shade.setVisibility(View.GONE);
         shade.setBackgroundColor(0x99000000);
@@ -205,14 +193,6 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams sub = new LinearLayout.LayoutParams(-1, -2);
         sub.topMargin = dp(5);
         titleBox.addView(channelSubtitle, sub);
-        programNow = text("", 15, WHITE, false);
-        programNow.setVisibility(View.GONE);
-        programNow.setMaxLines(2);
-        programNext = text("", 12, DIM, false);
-        programNext.setVisibility(View.GONE);
-        programNext.setMaxLines(2);
-        titleBox.addView(programNow,new LinearLayout.LayoutParams(-1,-2));
-        titleBox.addView(programNext,new LinearLayout.LayoutParams(-1,-2));
         FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
         titleParams.leftMargin = dp(18);
         titleParams.topMargin = dp(24);
@@ -226,8 +206,8 @@ public final class MainActivity extends Activity {
         bottom.setBackground(rounded(0xbb0c1119, 22));
 
         TextView previous = overlayButton("◀", "Предыдущий канал");
-        TextView back = overlayButton("↶", "Вернуться к предыдущему просмотренному");
-        back.setOnClickListener(v -> returnToPrevious());
+        TextView guide = overlayButton("▦", "Открыть телепрограмму");
+        guide.setOnClickListener(v -> openGuide());
         TextView menu = overlayButton("☰", "Список каналов");
         favoriteButton = overlayButton("☆", "Добавить в избранное");
         TextView next = overlayButton("▶", "Следующий канал");
@@ -238,7 +218,7 @@ public final class MainActivity extends Activity {
             showControls();
         });
         next.setOnClickListener(v -> move(1));
-        for(TextView b : new TextView[]{previous, back, menu, favoriteButton, next}) {
+        for(TextView b : new TextView[]{previous, menu, guide, favoriteButton, next}) {
             LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(53), dp(56));
             bp.leftMargin = dp(4);
             bp.rightMargin = dp(4);
@@ -407,7 +387,7 @@ public final class MainActivity extends Activity {
     private int dp(float v) { return (int)(v * getResources().getDisplayMetrics().density + .5f); }
 
     private void showControls() {
-        if(drawerOpen) return;
+        if(drawerOpen || guidePanel!=null) return;
         handler.removeCallbacks(hideTask);
         controls.animate().cancel();
         controls.setVisibility(View.VISIBLE);
@@ -417,7 +397,7 @@ public final class MainActivity extends Activity {
     }
 
     private void hideControls() {
-        if(drawerOpen) return;
+        if(drawerOpen || guidePanel!=null) return;
         handler.removeCallbacks(hideTask);
         if(!controlsVisible) return;
         controlsVisible = false;
@@ -428,10 +408,11 @@ public final class MainActivity extends Activity {
 
     private void scheduleHide() {
         handler.removeCallbacks(hideTask);
-        if(!drawerOpen && controlsVisible) handler.postDelayed(hideTask, AUTO_HIDE_MS);
+        if(!drawerOpen && guidePanel==null && controlsVisible) handler.postDelayed(hideTask, AUTO_HIDE_MS);
     }
 
     private void openDrawer() {
+        if(guidePanel!=null)closeGuide();
         handler.removeCallbacks(hideTask);
         controls.animate().cancel();
         controls.setVisibility(View.GONE);
@@ -516,7 +497,6 @@ public final class MainActivity extends Activity {
         channelSubtitle.setText("● ПРЯМОЙ ЭФИР  ·  IPTV");
         favoriteButton.setText(favorites.contains(c.key()) ? "★" : "☆");
         favoriteButton.setTextColor(favorites.contains(c.key()) ? YELLOW : WHITE);
-        updateProgram();
     }
 
     private void play(int index) { play(index, null); }
@@ -524,10 +504,6 @@ public final class MainActivity extends Activity {
     private void play(int index, String selectedSource) {
         if(index < 0 || index >= channels.size()) return;
         handler.removeCallbacks(streamWatchdog);
-        if(current >= 0 && current < channels.size() && current != index) {
-            previousChannelKey = channels.get(current).key();
-            prefs.edit().putString("previous_channel_v22",previousChannelKey).apply();
-        }
         current = index;
         Channel c = channels.get(index);
         prefs.edit().putString("last_channel", c.key()).apply();
@@ -546,10 +522,6 @@ public final class MainActivity extends Activity {
         updateCurrent();
         adapter.notifyDataSetChanged();
         if(drawerOpen) closeDrawer(); else showControls();
-        zappingBadge.setText(c.name);
-        zappingBadge.setVisibility(View.VISIBLE);
-        handler.removeCallbacks(hideZapping);
-        handler.postDelayed(hideZapping, 2300L);
         startSource();
     }
 
@@ -631,32 +603,39 @@ public final class MainActivity extends Activity {
         return prefs.getLong(badKey(url),0L)>System.currentTimeMillis();
     }
 
-    private void returnToPrevious() {
-        if(previousChannelKey.isEmpty()) return;
-        for(int i=0;i<channels.size();i++) {
-            if(channels.get(i).key().equals(previousChannelKey) && !channelSettings.hidden(channels.get(i))) {
-                play(i);
-                return;
-            }
+    private void openGuide() {
+        if(guidePanel!=null)return;
+        if(drawerOpen)closeDrawer();
+        controls.animate().cancel();
+        controls.setVisibility(View.GONE);
+        controlsVisible=false;
+        handler.removeCallbacks(hideTask);
+        ArrayList<Channel> visible=new ArrayList<>();
+        int selected=0;
+        for(Channel c:channels) {
+            if(channelSettings.hidden(c))continue;
+            if(current>=0 && current<channels.size() && channels.get(current).key().equals(c.key()))
+                selected=visible.size();
+            visible.add(c);
         }
+        guidePanel=new GuidePanel(this,visible,tvGuide,selected,new GuidePanel.Listener() {
+            @Override public void onPlay(Channel c) {
+                closeGuide();
+                int index=positionOf(c);
+                if(index>=0) play(index);
+            }
+            @Override public void onClose() {closeGuide();}
+        });
+        root.addView(guidePanel,new FrameLayout.LayoutParams(-1,-1));
+        guidePanel.requestFocus();
+        if(!tvGuide.hasLoaded())loadGuide();
     }
 
-    private void updateProgram() {
-        if(programNow==null || programNext==null) return;
-        TvGuide.Slot slot = current>=0 && current<channels.size() ? tvGuide.forChannel(channels.get(current)) : null;
-        if(slot==null || (slot.now==null && slot.next==null)) {
-            programNow.setVisibility(View.GONE);
-            programNext.setVisibility(View.GONE);
-            return;
-        }
-        if(slot.now!=null) {
-            programNow.setVisibility(View.VISIBLE);
-            programNow.setText("Сейчас: "+slot.now.title+"  •  до "+TvGuide.time(slot.now.end));
-        } else programNow.setVisibility(View.GONE);
-        if(slot.next!=null) {
-            programNext.setVisibility(View.VISIBLE);
-            programNext.setText("Далее "+TvGuide.time(slot.next.start)+": "+slot.next.title);
-        } else programNext.setVisibility(View.GONE);
+    private void closeGuide() {
+        if(guidePanel==null)return;
+        root.removeView(guidePanel);
+        guidePanel=null;
+        showControls();
     }
 
     private void loadGuide() {
@@ -671,8 +650,7 @@ public final class MainActivity extends Activity {
                 epgLoading=false;
                 if(isFinishing()||isDestroyed())return;
                 if(ready!=null) tvGuide.setFrom(ready);
-                updateProgram();
-                if(adapter!=null) adapter.notifyDataSetChanged();
+                if(guidePanel!=null)guidePanel.updateGuide(tvGuide);
             });
         }).start();
     }
@@ -743,7 +721,6 @@ public final class MainActivity extends Activity {
                 current = found;
                 filterChannels();
                 updateCurrent();
-                if(!channels.isEmpty()) loadGuide();
                 if(channels.isEmpty()) {
                     setMessage("Не удалось загрузить каналы. Проверьте подключение.");
                     showControls();
@@ -880,9 +857,6 @@ public final class MainActivity extends Activity {
                     (player != null && player.getPlaybackState() == Player.STATE_READY ?
                     "● Прямой эфир" : "Проверяем эфир…");
             }
-            TvGuide.Slot epg = tvGuide.forChannel(c);
-            if(epg!=null && epg.now!=null) status = "Сейчас: " + epg.now.title;
-            else if(epg!=null && epg.next!=null) status = "Далее " + TvGuide.time(epg.next.start) + ": " + epg.next.title;
             TextView subtitle = text(status, 11,
                 positionOf(c) == current && !allSourcesFailed ? BLUE : DIM, false);
             subtitle.setSingleLine(true);
@@ -958,6 +932,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if(guidePanel!=null)return super.dispatchKeyEvent(event);
         int key=event.getKeyCode();
         if(key==KeyEvent.KEYCODE_DPAD_CENTER || key==KeyEvent.KEYCODE_ENTER) {
             if(event.getAction()==KeyEvent.ACTION_UP && longPressedOk) {
@@ -996,6 +971,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if(guidePanel!=null)return super.onKeyDown(keyCode,event);
         if(drawerOpen) {
             if((keyCode==KeyEvent.KEYCODE_DPAD_CENTER || keyCode==KeyEvent.KEYCODE_ENTER)
                 && (event.isLongPress() || event.getRepeatCount()>=5)) {
@@ -1032,6 +1008,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
+        if(guidePanel!=null){closeGuide();return;}
         if(drawerOpen) { closeDrawer(); return; }
         if(controlsVisible) { hideControls(); return; }
         super.onBackPressed();
