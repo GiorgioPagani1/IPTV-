@@ -1,6 +1,7 @@
 package ru.rftv.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Bitmap;
@@ -44,11 +45,13 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.net.SocketTimeoutException;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -65,6 +68,12 @@ public final class MainActivity extends Activity {
     private final ExecutorService iconThreads = Executors.newFixedThreadPool(2);
     private final LruCache<String,Bitmap> iconCache = new LruCache<>(64);
     private final Runnable hideTask = () -> hideControls();
+    private final Runnable hideZapping = () -> { if(zappingBadge != null) zappingBadge.setVisibility(View.GONE); };
+    private TvGuide tvGuide = new TvGuide();
+    private ChannelSettings channelSettings;
+    private boolean epgLoading = false, showHidden = false;
+    private String previousChannelKey = "";
+    private TextView zappingBadge, programNow, programNext, hiddenTab;
     private final Runnable streamWatchdog = () -> switchSource("Превышено время ожидания");
     private final ArrayList<String> activeSources = new ArrayList<>();
     private SharedPreferences prefs;
@@ -94,9 +103,11 @@ public final class MainActivity extends Activity {
         );
         prefs = getSharedPreferences("rf_tv", MODE_PRIVATE);
         favorites.addAll(prefs.getStringSet("favorites", new HashSet<>()));
+        channelSettings = new ChannelSettings(prefs);
+        previousChannelKey = prefs.getString("previous_channel_v22", "");
         createUi();
         DefaultHttpDataSource.Factory http = new DefaultHttpDataSource.Factory()
-            .setUserAgent("RF-TV/2.1 (Android IPTV Player)")
+            .setUserAgent("RF-TV/2.2 (Android IPTV Player)")
             .setConnectTimeoutMs(10000)
             .setReadTimeoutMs(12000)
             .setAllowCrossProtocolRedirects(true);
@@ -116,9 +127,11 @@ public final class MainActivity extends Activity {
                     setMessage(null);
                     if(sourceIndex < activeSources.size()) {
                         prefs.edit().putString("good_source_" + channels.get(current).key(),
-                            activeSources.get(sourceIndex)).apply();
+                            activeSources.get(sourceIndex))
+                            .remove(badKey(activeSources.get(sourceIndex))).apply();
                     }
                     channelSubtitle.setText("● ПРЯМОЙ ЭФИР   •   " + (sourceIndex+1) + "/" + activeSources.size());
+                    updateProgram();
                 }
             }
             @Override public void onPlayerError(PlaybackException exception) {
@@ -160,6 +173,15 @@ public final class MainActivity extends Activity {
         root.addView(controls, new FrameLayout.LayoutParams(-1, -1));
         createOverlay();
 
+        zappingBadge = text("", 18, WHITE, true);
+        zappingBadge.setGravity(Gravity.CENTER);
+        zappingBadge.setPadding(dp(24),dp(12),dp(24),dp(12));
+        zappingBadge.setBackground(rounded(0xdd101f33,14));
+        zappingBadge.setVisibility(View.GONE);
+        FrameLayout.LayoutParams zb = new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER);
+        zb.leftMargin=dp(20);zb.rightMargin=dp(20);
+        root.addView(zappingBadge,zb);
+
         shade = new FrameLayout(this);
         shade.setVisibility(View.GONE);
         shade.setBackgroundColor(0x99000000);
@@ -183,6 +205,14 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams sub = new LinearLayout.LayoutParams(-1, -2);
         sub.topMargin = dp(5);
         titleBox.addView(channelSubtitle, sub);
+        programNow = text("", 15, WHITE, false);
+        programNow.setVisibility(View.GONE);
+        programNow.setMaxLines(2);
+        programNext = text("", 12, DIM, false);
+        programNext.setVisibility(View.GONE);
+        programNext.setMaxLines(2);
+        titleBox.addView(programNow,new LinearLayout.LayoutParams(-1,-2));
+        titleBox.addView(programNext,new LinearLayout.LayoutParams(-1,-2));
         FrameLayout.LayoutParams titleParams = new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.LEFT);
         titleParams.leftMargin = dp(18);
         titleParams.topMargin = dp(24);
@@ -196,6 +226,8 @@ public final class MainActivity extends Activity {
         bottom.setBackground(rounded(0xbb0c1119, 22));
 
         TextView previous = overlayButton("◀", "Предыдущий канал");
+        TextView back = overlayButton("↶", "Вернуться к предыдущему просмотренному");
+        back.setOnClickListener(v -> returnToPrevious());
         TextView menu = overlayButton("☰", "Список каналов");
         favoriteButton = overlayButton("☆", "Добавить в избранное");
         TextView next = overlayButton("▶", "Следующий канал");
@@ -206,8 +238,8 @@ public final class MainActivity extends Activity {
             showControls();
         });
         next.setOnClickListener(v -> move(1));
-        for(TextView b : new TextView[]{previous, menu, favoriteButton, next}) {
-            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(62), dp(56));
+        for(TextView b : new TextView[]{previous, back, menu, favoriteButton, next}) {
+            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(53), dp(56));
             bp.leftMargin = dp(4);
             bp.rightMargin = dp(4);
             bottom.addView(b, bp);
@@ -305,9 +337,21 @@ public final class MainActivity extends Activity {
         favTab = tab("★ Избранное");
         tabs.addView(allTab, new LinearLayout.LayoutParams(0, dp(46), 1));
         tabs.addView(favTab, new LinearLayout.LayoutParams(0, dp(46), 1));
-        allTab.setOnClickListener(v -> { favoritesOnly=false; filterChannels(); });
-        favTab.setOnClickListener(v -> { favoritesOnly=true; filterChannels(); });
+        allTab.setOnClickListener(v -> { favoritesOnly=false; showHidden=false; filterChannels(); });
+        favTab.setOnClickListener(v -> { favoritesOnly=true; showHidden=false; filterChannels(); });
         drawer.addView(tabs);
+
+        hiddenTab = text("Скрытые каналы (0) — показать / вернуть", 13, DIM, false);
+        hiddenTab.setGravity(Gravity.CENTER);
+        hiddenTab.setPadding(dp(8),dp(9),dp(8),dp(9));
+        hiddenTab.setFocusable(true);
+        hiddenTab.setClickable(true);
+        hiddenTab.setOnClickListener(v -> {
+            showHidden=!showHidden;
+            favoritesOnly=false;
+            filterChannels();
+        });
+        drawer.addView(hiddenTab,new LinearLayout.LayoutParams(-1,dp(40)));
 
         FrameLayout listArea = new FrameLayout(this);
         adapter = new ChannelAdapter();
