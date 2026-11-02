@@ -469,17 +469,76 @@ public final class MainActivity extends Activity {
 
     private void play(int index) {
         if(index < 0 || index >= channels.size()) return;
+        handler.removeCallbacks(streamWatchdog);
         current = index;
         Channel c = channels.get(index);
-        prefs.edit().putString("last", c.url).apply();
-        player.setMediaItem(MediaItem.fromUri(c.url));
+        prefs.edit().putString("last_channel", c.key()).apply();
+        sourceIndex = 0;
+        lastError = "";
+        allSourcesFailed = false;
+        activeSources.clear();
+        String good = prefs.getString("good_source_" + c.key(), "");
+        if(!good.isEmpty() && c.sources.contains(good)) activeSources.add(good);
+        for(String url : c.sources) if(!activeSources.contains(url)) activeSources.add(url);
+        updateCurrent();
+        adapter.notifyDataSetChanged();
+        if(drawerOpen) closeDrawer(); else showControls();
+        startSource();
+    }
+
+    private void startSource() {
+        handler.removeCallbacks(streamWatchdog);
+        if(current < 0 || current >= channels.size()) return;
+        if(sourceIndex >= activeSources.size()) {
+            allSourcesFailed = true;
+            player.stop();
+            channelSubtitle.setText("● НЕТ ДОСТУПНОГО ЭФИРА");
+            setMessage("Нет рабочего источника для канала «" + channels.get(current).name +
+                "». " + lastError + ".\nПереключите канал ◀ ▶ или выберите другой через ☰.");
+            showControls();
+            return;
+        }
+        allSourcesFailed = false;
+        channelSubtitle.setText("ПОДКЛЮЧАЕМ ИСТОЧНИК " + (sourceIndex+1) + " / " + activeSources.size());
+        setMessage("Проверяем эфир • источник " + (sourceIndex+1) + "/" + activeSources.size());
+        String url = activeSources.get(sourceIndex);
+        MediaItem.Builder item = new MediaItem.Builder().setUri(url);
+        String lower = url.toLowerCase(Locale.ROOT);
+        if(lower.contains(".m3u8")) item.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_M3U8);
+        else if(lower.contains(".mpd")) item.setMimeType(androidx.media3.common.MimeTypes.APPLICATION_MPD);
+        player.setMediaItem(item.build());
         player.prepare();
         player.play();
-        updateCurrent();
-        setMessage("Подключаемся к эфиру…");
-        adapter.notifyDataSetChanged();
-        if(drawerOpen) closeDrawer();
-        else showControls();
+        scheduleStreamTimeout();
+    }
+
+    private void scheduleStreamTimeout() {
+        handler.removeCallbacks(streamWatchdog);
+        if(!allSourcesFailed) handler.postDelayed(streamWatchdog, STREAM_TIMEOUT_MS);
+    }
+
+    private void switchSource(String cause) {
+        if(allSourcesFailed || current < 0) return;
+        handler.removeCallbacks(streamWatchdog);
+        lastError = cause;
+        sourceIndex++;
+        startSource();
+    }
+
+    private String errorDescription(PlaybackException exception) {
+        Throwable cause = exception;
+        while(cause != null) {
+            if(cause instanceof HttpDataSource.InvalidResponseCodeException) {
+                int code = ((HttpDataSource.InvalidResponseCodeException)cause).responseCode;
+                if(code == 401 || code == 403) return "Доступ к трансляции ограничен (HTTP " + code + ")";
+                if(code == 404 || code == 410) return "Ссылка на трансляцию устарела (HTTP " + code + ")";
+                if(code == 429) return "Сервер ограничил обращения (HTTP 429)";
+                return "Ошибка сервера (HTTP " + code + ")";
+            }
+            if(cause instanceof SocketTimeoutException) return "Сервер не ответил";
+            cause = cause.getCause();
+        }
+        return "Не удалось воспроизвести видеопоток";
     }
 
     private void move(int delta) {
@@ -536,20 +595,18 @@ public final class MainActivity extends Activity {
                     content = data.toString("UTF-8");
                 } catch(Exception ignored) {}
             }
-            List<Channel> result = PlaylistParser.parse(content);
-            result.sort(Comparator.comparingInt((Channel c) -> channelRank(c.name))
-                .thenComparing(c -> c.name.toLowerCase(Locale.ROOT)));
+            List<Channel> result = ChannelCatalog.popularOnly(PlaylistParser.parse(content));
             boolean useCache = cached;
             runOnUiThread(() -> {
                 if(isFinishing() || isDestroyed()) return;
                 loading = false;
-                String oldUrl = current >= 0 && current < channels.size()
-                    ? channels.get(current).url : prefs.getString("last", "");
+                String previousKey = current >= 0 && current < channels.size()
+                    ? channels.get(current).key() : prefs.getString("last_channel", "");
                 channels.clear();
                 channels.addAll(result);
                 int found = -1;
                 for(int i=0;i<channels.size();i++) {
-                    if(channels.get(i).url.equals(oldUrl)) { found=i; break; }
+                    if(channels.get(i).key().equals(previousKey)) { found=i; break; }
                 }
                 boolean playing = current >= 0 && player.getMediaItemCount() > 0;
                 current = found;
@@ -562,7 +619,7 @@ public final class MainActivity extends Activity {
                 }
                 if(!playing) play(found >= 0 ? found : 0);
                 else {
-                    if(current < 0) current = 0;
+                    if(current < 0) { play(0); return; }
                     setMessage(null);
                     updateCurrent();
                     if(useCache) showControls();
