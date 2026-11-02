@@ -82,7 +82,7 @@ public final class TvGuide {
         loaded=true;
     }
 
-    public static LoadResult fetch(Context context,List<Channel> channels) {
+    public static LoadResult fetch(Context context,List<Channel> channels,boolean forceRefresh) {
         Map<String,String> aliases=aliases(channels);
         Map<String,Slot> merged=new HashMap<>();
         String sourceUsed="",issues="";
@@ -90,7 +90,7 @@ public final class TvGuide {
         for(int index=0;index<SOURCES.length;index++) {
             String name=SOURCES[index][0];
             try {
-                File file=download(context,index,SOURCES[index][1]);
+                File file=download(context,index,SOURCES[index][1],forceRefresh);
                 Map<String,Slot> available=parse(file,aliases);
                 for(Map.Entry<String,Slot> entry:available.entrySet()) {
                     if(!merged.containsKey(entry.getKey()) || merged.get(entry.getKey()).schedule.isEmpty())
@@ -113,9 +113,9 @@ public final class TvGuide {
         return new LoadResult(merged,sourceUsed,status,merged.size());
     }
 
-    private static File download(Context ctx,int index,String address) throws Exception {
+    private static File download(Context ctx,int index,String address,boolean forceRefresh) throws Exception {
         File cache=new File(ctx.getFilesDir(),"epg_ru_v23_"+index+".xml.gz");
-        if(cache.isFile() && cache.length()>100 &&
+        if(!forceRefresh && cache.isFile() && cache.length()>100 &&
            System.currentTimeMillis()-cache.lastModified()<CACHE_MS) return cache;
 
         File tmp=new File(ctx.getFilesDir(),"epg_ru_v23_"+index+".tmp");
