@@ -71,7 +71,7 @@ public final class MainActivity extends Activity {
     private final Runnable hideZapping = () -> { if(zappingBadge != null) zappingBadge.setVisibility(View.GONE); };
     private TvGuide tvGuide = new TvGuide();
     private ChannelSettings channelSettings;
-    private boolean epgLoading = false, showHidden = false;
+    private boolean epgLoading = false, showHidden = false, resumeAfterBackground = false, longPressedOk = false;
     private String previousChannelKey = "";
     private TextView zappingBadge, programNow, programNext, hiddenTab;
     private final Runnable streamWatchdog = () -> switchSource("Превышено время ожидания");
@@ -957,6 +957,44 @@ public final class MainActivity extends Activity {
         });
     }
 
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        int key=event.getKeyCode();
+        if(key==KeyEvent.KEYCODE_DPAD_CENTER || key==KeyEvent.KEYCODE_ENTER) {
+            if(event.getAction()==KeyEvent.ACTION_UP && longPressedOk) {
+                longPressedOk=false;
+                return true;
+            }
+            if(event.getAction()==KeyEvent.ACTION_DOWN && longPressedOk) return true;
+            if(event.getAction()==KeyEvent.ACTION_DOWN &&
+                (event.isLongPress() || event.getRepeatCount()>=4)) {
+                Channel selected=null;
+                if(drawerOpen) {
+                    View focused=getCurrentFocus();
+                    while(focused!=null) {
+                        if(focused.getTag() instanceof Channel) {
+                            selected=(Channel)focused.getTag();
+                            break;
+                        }
+                        if(!(focused.getParent() instanceof View)) break;
+                        focused=(View)focused.getParent();
+                    }
+                    if(selected==null && channelList!=null) {
+                        int pos=channelList.getSelectedItemPosition();
+                        if(pos>=0 && pos<shown.size()) selected=channels.get(shown.get(pos));
+                    }
+                } else if(current>=0 && current<channels.size()) {
+                    selected=channels.get(current);
+                }
+                if(selected!=null) {
+                    longPressedOk=true;
+                    showChannelMenu(selected);
+                    return true;
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
         if(drawerOpen) {
             if((keyCode==KeyEvent.KEYCODE_DPAD_CENTER || keyCode==KeyEvent.KEYCODE_ENTER)
@@ -999,9 +1037,18 @@ public final class MainActivity extends Activity {
         super.onBackPressed();
     }
 
+    @Override protected void onStart() {
+        super.onStart();
+        if(resumeAfterBackground && player!=null && player.getMediaItemCount()>0) {
+            player.play();
+            resumeAfterBackground=false;
+        }
+    }
+
     @Override protected void onStop() {
+        resumeAfterBackground = player!=null && player.isPlaying();
+        if(player!=null) player.pause();
         super.onStop();
-        if(player != null) player.pause();
     }
 
     @Override protected void onDestroy() {
