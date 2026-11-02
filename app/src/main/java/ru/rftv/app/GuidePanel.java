@@ -27,6 +27,7 @@ public final class GuidePanel extends FrameLayout {
     public interface Listener {
         void onPlay(Channel channel);
         void onClose();
+        void onRefresh();
     }
 
     private static final int WHITE=Color.WHITE;
@@ -78,6 +79,14 @@ public final class GuidePanel extends FrameLayout {
         tparams.leftMargin=dp(10);
         toolbar.addView(title,tparams);
 
+        TextView reload=button("↻",25);
+        reload.setContentDescription("Обновить телепрограмму из интернета");
+        reload.setOnClickListener(v->{
+            listener.onRefresh();
+            reload.setText("…");
+            reload.postDelayed(()->reload.setText("↻"),3500);
+        });
+        toolbar.addView(reload,new LinearLayout.LayoutParams(dp(44),dp(45)));
         TextView time=text(new SimpleDateFormat("HH:mm",Locale.getDefault()).format(new Date()),
             17,MUTED,true);
         time.setGravity(Gravity.CENTER);
@@ -219,8 +228,8 @@ public final class GuidePanel extends FrameLayout {
         TvGuide.Slot slot=tvGuide.forChannel(channel);
         if(slot==null || (slot.now==null && slot.next==null)) {
             TextView missing=text(tvGuide.hasLoaded() ?
-                "Для этого канала нет данных телепрограммы" :
-                "Загружаем телепрограмму…",16,MUTED,false);
+                tvGuide.status() :
+                "Загружаем российскую телепрограмму…",16,MUTED,false);
             missing.setPadding(0,dp(28),0,dp(25));
             pane.addView(missing);
         } else {
