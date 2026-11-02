@@ -56,7 +56,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private static final String SOURCE = "https://iptv-org.github.io/iptv/countries/ru.m3u";
     private static final long AUTO_HIDE_MS = 5000L;
-    private static final long STREAM_TIMEOUT_MS = 14000L;
+    private static final long STREAM_TIMEOUT_MS = 12000L;
     private static final int WHITE = Color.WHITE, DIM = 0xffb8c4d5, BLUE = 0xff92bfff, YELLOW = 0xffffcf64;
     private final ArrayList<Channel> channels = new ArrayList<>();
     private final ArrayList<Integer> shown = new ArrayList<>();
@@ -663,12 +663,24 @@ public final class MainActivity extends Activity {
             row.addView(icon, new LinearLayout.LayoutParams(dp(48), dp(49)));
             fetchLogo(c.logo, logo, placeholder);
 
+            LinearLayout details = new LinearLayout(MainActivity.this);
+            details.setOrientation(LinearLayout.VERTICAL);
             TextView name = text(c.name, 15, WHITE, false);
             name.setSingleLine(true);
             name.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams nameParams = new LinearLayout.LayoutParams(0, -2, 1f);
-            nameParams.leftMargin = dp(12);
-            row.addView(name, nameParams);
+            details.addView(name);
+            String status = c.sources.size() == 1 ? "1 источник" : c.sources.size() + " источников";
+            if(positionOf(c) == current) {
+                status = allSourcesFailed ? "Недоступен сейчас" :
+                    (player != null && player.getPlaybackState() == Player.STATE_READY ?
+                    "● Прямой эфир" : "Проверяем эфир…");
+            }
+            TextView subtitle = text(status, 11,
+                positionOf(c) == current && !allSourcesFailed ? BLUE : DIM, false);
+            details.addView(subtitle);
+            LinearLayout.LayoutParams detailsParams = new LinearLayout.LayoutParams(0, -2, 1f);
+            detailsParams.leftMargin = dp(12);
+            row.addView(details, detailsParams);
 
             TextView star = text(favorites.contains(c.key()) ? "★" : "☆", 25,
                 favorites.contains(c.key()) ? YELLOW : DIM, false);
