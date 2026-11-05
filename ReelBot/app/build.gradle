@@ -2,7 +2,7 @@ plugins { id 'com.android.application' }
 
 android {
     namespace 'ru.reelbot'
-    compileSdk 35
+    compileSdk 36
     defaultConfig {
         applicationId 'ru.reelbot'
         minSdk 29
