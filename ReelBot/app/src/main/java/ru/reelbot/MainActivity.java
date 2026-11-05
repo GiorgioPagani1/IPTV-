@@ -14,7 +14,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.View;
+import android.view.Gravity;
+import android.text.InputType;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
@@ -56,6 +59,8 @@ public final class MainActivity extends Activity {
     private ProgressBar progress;
     private VideoView preview;
     private RadioGroup length, rhythm;
+    private EditText instructionsField;
+    private final ArrayList<Button> presetButtons=new ArrayList<>();
     private Transformer transformer;
     private Runnable ticker;
     private File temporary;
@@ -71,8 +76,17 @@ public final class MainActivity extends Activity {
         final int source;
         final long from,to;
         final double score;
+        final float[] entry, exit;
+        final double dx,dy;
         Shot(int source,long from,long to,double score) {
+            this(source,from,to,score,null,null,0,0);
+        }
+        Shot(int source,long from,long to,double score,float[] entry,float[] exit,double dx,double dy) {
             this.source=source;this.from=from;this.to=to;this.score=score;
+            this.entry=entry;this.exit=exit;this.dx=dx;this.dy=dy;
+        }
+        Shot trimmed(long milliseconds) {
+            return new Shot(source,from,from+milliseconds,score,entry,exit,dx,dy);
         }
     }
 
@@ -109,8 +123,27 @@ public final class MainActivity extends Activity {
         radio(rhythm,"Динамичный",1,true);
         radio(rhythm,"Спокойный",2,false);
         column.addView(rhythm);
+        addSpace(column,18);
+        addText(column,"ЗАДАНИЕ ДЛЯ МОНТАЖА",14,true,Color.WHITE);
+        addText(column,"Напиши, как монтировать видео. Команды работают локально, без облачного ИИ.",12,false,0xffa8b0c0);
+        instructionsField=new EditText(this);
+        instructionsField.setTextColor(Color.WHITE);
+        instructionsField.setHintTextColor(0xff8491a9);
+        instructionsField.setTextSize(14);
+        instructionsField.setMinLines(3);
+        instructionsField.setMaxLines(6);
+        instructionsField.setGravity(Gravity.TOP | Gravity.START);
+        instructionsField.setInputType(InputType.TYPE_CLASS_TEXT |
+            InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        instructionsField.setHint("Например: Склейки по движению, сохраняй направление. Монтаж в бит музыки, динамичный темп.");
+        column.addView(instructionsField,new LinearLayout.LayoutParams(-1,dp(128)));
+        addText(column,"БЫСТРЫЕ ЗАДАНИЯ",12,true,0xffbbc6e1);
+        preset(column,"↗  По движению","Динамичный монтаж. Подбирай склейки по направлению движения.");
+        preset(column,"◎  По объекту","Плавный монтаж. Склейки по объекту — подбирай кадры похожие по цвету, форме и композиции.");
+        preset(column,"♫  В музыкальный бит","Динамичный монтаж, делай склейки в бит музыки по сильным ударам.");
+        preset(column,"✦  Движение + бит","Динамичные склейки по движению, сохраняй направление и монтируй в бит музыки.");
         addSpace(column,15);
-        start=button(column,"✦  АВТОМОНТАЖ");
+        start=button(column,"✦  АВТОМОНТАЖ ПО ЗАДАНИЮ");
         cancel=button(column,"Остановить");
         cancel.setVisibility(View.GONE);
         progress=new ProgressBar(this,null,android.R.attr.progressBarStyleHorizontal);
@@ -128,7 +161,7 @@ public final class MainActivity extends Activity {
         share=button(column,"Поделиться видео");
         share.setVisibility(View.GONE);
         addSpace(column,12);
-        addText(column,"MVP: выбираются фрагменты с движением, хорошим светом и детализацией. Смысл сцены, реплики и музыкальный бит пока не анализируются.",12,false,0xff8e96ab);
+        addText(column,"Ритм определяется по звуковым ударам в выбранной музыке. Склейки по объекту сравнивают цвет/композицию, а по движению — примерное направление. Распознавания предметов и полноценного понимания сюжета пока нет.",12,false,0xff8e96ab);
         setContentView(scroll);
         chooseVideos.setOnClickListener(v->picker("video/*",true,VIDEO_REQUEST));
         chooseMusic.setOnClickListener(v->picker("audio/*",false,AUDIO_REQUEST));
@@ -155,6 +188,14 @@ public final class MainActivity extends Activity {
     private Button button(LinearLayout p,String label) {
         Button b=new Button(this);b.setText(label);b.setAllCaps(false);
         p.addView(b,new LinearLayout.LayoutParams(-1,dp(52)));return b;
+    }
+    private void preset(LinearLayout parent,String label,String text) {
+        Button b=button(parent,label);
+        b.setOnClickListener(v->{
+            instructionsField.setText(text);
+            instructionsField.setSelection(instructionsField.getText().length());
+        });
+        presetButtons.add(b);
     }
     private void radio(RadioGroup p,String label,int id,boolean checked) {
         RadioButton b=new RadioButton(this);b.setId(id);b.setText(label);
@@ -222,78 +263,135 @@ public final class MainActivity extends Activity {
         if(sources.isEmpty()){message.setText("Сначала выбери хотя бы один видеоклип");return;}
         final ArrayList<Source> selected=new ArrayList<>(sources);
         final int lengthSeconds=length.getCheckedRadioButtonId();
-        final int segmentMs=rhythm.getCheckedRadioButtonId()==1?2800:4800;
         final Uri soundtrack=music;
+        final int defaultSegmentMs=rhythm.getCheckedRadioButtonId()==1?2800:4800;
+        final EditInstructions edit=EditInstructions.parse(
+            instructionsField.getText().toString(),defaultSegmentMs);
+        if(edit.toBeat && soundtrack==null) {
+            message.setText("Для монтажа в бит добавь музыку через кнопку ♫");
+            return;
+        }
         final int job=++generation;
         saved=null;share.setVisibility(View.GONE);preview.stopPlayback();preview.setVisibility(View.GONE);
-        setBusy(true,"Анализирую фрагменты...");
+        setBusy(true,"Инструкция: "+edit.description());
         worker.execute(()->{
-            try{
-                List<Shot> shots=plan(selected,segmentMs,lengthSeconds,job);
+            try {
+                BeatAnalyzer.Result beats=null;
+                if(edit.toBeat) {
+                    main.post(()->{if(job==generation)message.setText("Слушаю ритм выбранной музыки...");});
+                    beats=BeatAnalyzer.analyze(this,soundtrack,lengthSeconds*1000L);
+                }
+                if(job!=generation)return;
+                List<Long> durations=edit.durations(lengthSeconds*1000L,
+                    beats==null?Collections.emptyList():beats.beatsMs);
+                String beatNote=beats==null?"":beats.warning==null
+                    ?" · ритм ~"+beats.estimatedBpm+" BPM"
+                    :" · бит не найден: "+beats.warning+"; равномерная нарезка";
+                main.post(()->{if(job==generation)message.setText("Подбираю гармоничные склейки...");});
+                List<Shot> shots=plan(selected,edit.segmentMs,lengthSeconds,job,edit,durations);
                 main.post(()->{
                     if(job!=generation||isFinishing())return;
                     if(shots.isEmpty()){setBusy(false,"Нет подходящих фрагментов");return;}
-                    export(selected,shots,soundtrack,job);
+                    export(selected,shots,soundtrack,job,beatNote);
                 });
-            }catch(Exception e){main.post(()->{
+            } catch(Exception e) {main.post(()->{
                 if(job==generation)setBusy(false,"Ошибка анализа: "+e.getMessage());
             });}
         });
     }
-    private List<Shot> plan(List<Source> clips,int cutMs,int targetSec,int job) {
-        List<List<Shot>> bySource=new ArrayList<>();
+    private List<Shot> plan(List<Source> clips,int cutMs,int targetSec,int job,
+                            EditInstructions edit,List<Long> durations) {
+        long longest=cutMs;
+        for(long duration:durations)longest=Math.max(longest,duration);
+        List<List<Shot>> pools=new ArrayList<>();
         for(int i=0;i<clips.size();i++) {
-            if(job!=generation)break;
-            Source s=clips.get(i);ArrayList<Shot> pool=new ArrayList<>();
-            long size=Math.min(s.duration,cutMs);
-            if(size<800){bySource.add(pool);continue;}
-            long last=s.duration-size;
-            int num=Math.max(1,Math.min(24,(int)(s.duration/cutMs)));
-            MediaMetadataRetriever r=new MediaMetadataRetriever();
+            if(job!=generation)return Collections.emptyList();
+            Source source=clips.get(i);
+            ArrayList<Shot> pool=new ArrayList<>();
+            long size=Math.min(source.duration,longest);
+            if(size<800){pools.add(pool);continue;}
+            long last=source.duration-size;
+            int sampleCount=Math.max(1,Math.min(28,(int)(source.duration/Math.max(1000,cutMs/2))));
+            MediaMetadataRetriever retriever=new MediaMetadataRetriever();
             try {
-                r.setDataSource(this,s.uri);
-                for(int n=0;n<num&&job==generation;n++) {
-                    long from=num==1?0:Math.round(last*(n/(double)(num-1)));
-                    Bitmap a=sample(r,from+size/3);
-                    Bitmap b=sample(r,from+size*2/3);
-                    double score=quality(a,b);
-                    if(a!=null)a.recycle();
-                    if(b!=null)b.recycle();
-                    pool.add(new Shot(i,from,from+size,score));
+                retriever.setDataSource(this,source.uri);
+                for(int n=0;n<sampleCount&&job==generation;n++) {
+                    long from=sampleCount==1?0:Math.round(last*n/(double)(sampleCount-1));
+                    long edgeMargin=Math.min(300,Math.max(80,size/6));
+                    Bitmap first=sample(retriever,from+edgeMargin);
+                    Bitmap second=sample(retriever,from+size-edgeMargin);
+                    double score=quality(first,second);
+                    float[] entry=VisualMatcher.fingerprint(first);
+                    float[] exit=VisualMatcher.fingerprint(second);
+                    double[] direction=VisualMatcher.movement(first,second);
+                    if(first!=null)first.recycle();
+                    if(second!=null)second.recycle();
+                    pool.add(new Shot(i,from,from+size,score,
+                        entry,exit,direction[0],direction[1]));
                 }
-            }catch(Exception ignored) {
+            } catch(Exception ignored) {
                 if(pool.isEmpty())pool.add(new Shot(i,0,size,.3));
-            }finally{try{r.release();}catch(Exception ignored){}}
-            pool.sort((x,y)->Double.compare(y.score,x.score));
-            bySource.add(pool);
+            } finally {try{retriever.release();}catch(Exception ignored){}}
+            pools.add(pool);
             int done=i+1,total=clips.size();
-            main.post(()->{if(job==generation)message.setText("Анализ: "+done+" из "+total+" видео");});
+            main.post(()->{if(job==generation)message.setText("Анализ сцены: "+done+" из "+total+" видео");});
         }
-        List<Shot> result=new ArrayList<>();
-        int[] at=new int[clips.size()];
-        long remain=targetSec*1000L;
-        boolean any=true;
-        while(any&&remain>=800&&job==generation) {
-            any=false;
-            for(int i=0;i<clips.size()&&remain>=800;i++) {
-                List<Shot> pool=bySource.get(i);
-                while(at[i]<pool.size()) {
-                    Shot shot=pool.get(at[i]++);
-                    boolean overlap=false;
-                    for(Shot prev:result)if(prev.source==i&&shot.from<prev.to&&prev.from<shot.to){overlap=true;break;}
-                    if(overlap)continue;
-                    long take=Math.min(remain,shot.to-shot.from);
-                    if(take<800)continue;
-                    result.add(new Shot(i,shot.from,shot.from+take,shot.score));
-                    remain-=take;any=true;break;
+
+        ArrayList<Shot> chosen=new ArrayList<>();
+        boolean[] used=new boolean[clips.size()];
+        Shot previous=null;
+        // Select globally, considering source variety and a natural-looking cut into the next shot.
+        for(long requested:durations) {
+            if(job!=generation)break;
+            Shot best=null;
+            long bestLength=0;
+            double bestRank=-Double.MAX_VALUE;
+            for(List<Shot> pool:pools) for(Shot candidate:pool) {
+                long available=candidate.to-candidate.from;
+                long take=Math.min(requested,available);
+                if(take<800)continue;
+                boolean overlaps=false;
+                for(Shot prior:chosen) {
+                    if(prior.source==candidate.source &&
+                        candidate.from<prior.to && prior.from<candidate.from+take) {
+                        overlaps=true;break;
+                    }
                 }
+                if(overlaps)continue;
+                double rank=candidate.score*.73;
+                if(take==requested)rank+=.30;
+                else rank-=.45*(requested-take)/(double)requested;
+                if(!used[candidate.source])rank+=.06;
+                if(previous!=null) {
+                    double color=VisualMatcher.visualContinuity(previous.exit,candidate.entry);
+                    double direction=VisualMatcher.directionalContinuity(
+                        previous.dx,previous.dy,candidate.dx,candidate.dy);
+                    if(edit.matching==EditInstructions.Matching.MOTION)
+                        rank+=.42*direction+.08*color;
+                    else if(edit.matching==EditInstructions.Matching.VISUAL_OBJECT)
+                        rank+=.46*color+.04*direction;
+                    else rank+=.18*color+.12*direction;
+                    if(previous.source==candidate.source)rank-=.12;
+                }
+                if(rank>bestRank) {bestRank=rank;best=candidate;bestLength=take;}
             }
+            if(best==null)break;
+            Shot selected=best.trimmed(bestLength);
+            chosen.add(selected);
+            used[selected.source]=true;
+            previous=selected;
         }
-        return result;
+        return chosen;
     }
     private Bitmap sample(MediaMetadataRetriever r,long ms) {
-        try{return r.getScaledFrameAtTime(ms*1000,MediaMetadataRetriever.OPTION_CLOSEST,64,64);}
-        catch(Exception ignored){return null;}
+        try {
+            Bitmap frame=r.getScaledFrameAtTime(ms*1000,MediaMetadataRetriever.OPTION_CLOSEST,96,96);
+            if(frame==null)return null;
+            if(frame.getWidth()==64&&frame.getHeight()==64)return frame;
+            Bitmap square=Bitmap.createScaledBitmap(frame,64,64,true);
+            if(square!=frame)frame.recycle();
+            return square;
+        } catch(Exception ignored){return null;}
     }
     private double quality(Bitmap a,Bitmap b) {
         if(a==null)return .25;
@@ -314,7 +412,7 @@ public final class MainActivity extends Activity {
         return .2*exposure+.3*Math.min(1,edge/count/38.)+.5*Math.min(1,motion/count/50.);
     }
 
-    private void export(List<Source> sources,List<Shot> shots,Uri soundtrack,int job) {
+    private void export(List<Source> sources,List<Shot> shots,Uri soundtrack,int job,String beatNote) {
         ArrayList<EditedMediaItem> items=new ArrayList<>();
         for(Shot s:shots){
             MediaItem m=new MediaItem.Builder().setUri(sources.get(s.source).uri)
@@ -352,7 +450,7 @@ public final class MainActivity extends Activity {
                                 file.delete();
                                 main.post(()->{
                                     if(job!=generation)return;
-                                    saved=uri;setBusy(false,"Готово! Рилс в галерее → Movies/ReelBot");
+                                    saved=uri;setBusy(false,"Готово! Рилс в галерее → Movies/ReelBot"+beatNote);
                                     preview.setVisibility(View.VISIBLE);
                                     preview.setVideoURI(uri);preview.requestFocus();
                                     share.setVisibility(View.VISIBLE);
@@ -418,6 +516,8 @@ public final class MainActivity extends Activity {
     private void setBusy(boolean active,String status){
         busy=active;message.setText(status);
         chooseVideos.setEnabled(!active);chooseMusic.setEnabled(!active);start.setEnabled(!active);
+        if(instructionsField!=null)instructionsField.setEnabled(!active);
+        for(Button preset:presetButtons)preset.setEnabled(!active);
         length.setEnabled(!active);rhythm.setEnabled(!active);
         for(int i=0;i<length.getChildCount();i++)length.getChildAt(i).setEnabled(!active);
         for(int i=0;i<rhythm.getChildCount();i++)rhythm.getChildAt(i).setEnabled(!active);
