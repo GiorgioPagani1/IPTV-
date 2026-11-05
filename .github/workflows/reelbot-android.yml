@@ -1,0 +1,43 @@
+name: ReelBot Android APK
+on:
+  push:
+    branches: [main, feature/reelbot-android]
+    paths:
+      - 'ReelBot/**'
+      - '.github/workflows/reelbot-android.yml'
+  pull_request:
+    paths:
+      - 'ReelBot/**'
+      - '.github/workflows/reelbot-android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ReelBot APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK 35 using preinstalled SDK manager
+        run: |
+          set -euxo pipefail
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;35.0.0"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Compile installable Android APK
+        run: gradle --no-daemon --stacktrace -p ReelBot :app:assembleDebug
+      - name: Upload installation APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: ReelBot-Android-APK
+          path: ReelBot/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
