@@ -299,60 +299,99 @@ public final class MainActivity extends Activity {
             });}
         });
     }
-    private List<Shot> plan(List<Source> clips,int cutMs,int targetSec,int job) {
-        List<List<Shot>> bySource=new ArrayList<>();
+    private List<Shot> plan(List<Source> clips,int cutMs,int targetSec,int job,
+                            EditInstructions edit,List<Long> durations) {
+        long longest=cutMs;
+        for(long duration:durations)longest=Math.max(longest,duration);
+        List<List<Shot>> pools=new ArrayList<>();
         for(int i=0;i<clips.size();i++) {
-            if(job!=generation)break;
-            Source s=clips.get(i);ArrayList<Shot> pool=new ArrayList<>();
-            long size=Math.min(s.duration,cutMs);
-            if(size<800){bySource.add(pool);continue;}
-            long last=s.duration-size;
-            int num=Math.max(1,Math.min(24,(int)(s.duration/cutMs)));
-            MediaMetadataRetriever r=new MediaMetadataRetriever();
+            if(job!=generation)return Collections.emptyList();
+            Source source=clips.get(i);
+            ArrayList<Shot> pool=new ArrayList<>();
+            long size=Math.min(source.duration,longest);
+            if(size<800){pools.add(pool);continue;}
+            long last=source.duration-size;
+            int sampleCount=Math.max(1,Math.min(28,(int)(source.duration/Math.max(1000,cutMs/2))));
+            MediaMetadataRetriever retriever=new MediaMetadataRetriever();
             try {
-                r.setDataSource(this,s.uri);
-                for(int n=0;n<num&&job==generation;n++) {
-                    long from=num==1?0:Math.round(last*(n/(double)(num-1)));
-                    Bitmap a=sample(r,from+size/3);
-                    Bitmap b=sample(r,from+size*2/3);
-                    double score=quality(a,b);
-                    if(a!=null)a.recycle();
-                    if(b!=null)b.recycle();
-                    pool.add(new Shot(i,from,from+size,score));
+                retriever.setDataSource(this,source.uri);
+                for(int n=0;n<sampleCount&&job==generation;n++) {
+                    long from=sampleCount==1?0:Math.round(last*n/(double)(sampleCount-1));
+                    long edgeMargin=Math.min(300,Math.max(80,size/6));
+                    Bitmap first=sample(retriever,from+edgeMargin);
+                    Bitmap second=sample(retriever,from+size-edgeMargin);
+                    double score=quality(first,second);
+                    float[] entry=VisualMatcher.fingerprint(first);
+                    float[] exit=VisualMatcher.fingerprint(second);
+                    double[] direction=VisualMatcher.movement(first,second);
+                    if(first!=null)first.recycle();
+                    if(second!=null)second.recycle();
+                    pool.add(new Shot(i,from,from+size,score,
+                        entry,exit,direction[0],direction[1]));
                 }
-            }catch(Exception ignored) {
+            } catch(Exception ignored) {
                 if(pool.isEmpty())pool.add(new Shot(i,0,size,.3));
-            }finally{try{r.release();}catch(Exception ignored){}}
-            pool.sort((x,y)->Double.compare(y.score,x.score));
-            bySource.add(pool);
+            } finally {try{retriever.release();}catch(Exception ignored){}}
+            pools.add(pool);
             int done=i+1,total=clips.size();
-            main.post(()->{if(job==generation)message.setText("Анализ: "+done+" из "+total+" видео");});
+            main.post(()->{if(job==generation)message.setText("Анализ сцены: "+done+" из "+total+" видео");});
         }
-        List<Shot> result=new ArrayList<>();
-        int[] at=new int[clips.size()];
-        long remain=targetSec*1000L;
-        boolean any=true;
-        while(any&&remain>=800&&job==generation) {
-            any=false;
-            for(int i=0;i<clips.size()&&remain>=800;i++) {
-                List<Shot> pool=bySource.get(i);
-                while(at[i]<pool.size()) {
-                    Shot shot=pool.get(at[i]++);
-                    boolean overlap=false;
-                    for(Shot prev:result)if(prev.source==i&&shot.from<prev.to&&prev.from<shot.to){overlap=true;break;}
-                    if(overlap)continue;
-                    long take=Math.min(remain,shot.to-shot.from);
-                    if(take<800)continue;
-                    result.add(new Shot(i,shot.from,shot.from+take,shot.score));
-                    remain-=take;any=true;break;
+
+        ArrayList<Shot> chosen=new ArrayList<>();
+        boolean[] used=new boolean[clips.size()];
+        Shot previous=null;
+        // Select globally, considering source variety and a natural-looking cut into the next shot.
+        for(long requested:durations) {
+            if(job!=generation)break;
+            Shot best=null;
+            long bestLength=0;
+            double bestRank=-Double.MAX_VALUE;
+            for(List<Shot> pool:pools) for(Shot candidate:pool) {
+                long available=candidate.to-candidate.from;
+                long take=Math.min(requested,available);
+                if(take<800)continue;
+                boolean overlaps=false;
+                for(Shot prior:chosen) {
+                    if(prior.source==candidate.source &&
+                        candidate.from<prior.to && prior.from<candidate.from+take) {
+                        overlaps=true;break;
+                    }
                 }
+                if(overlaps)continue;
+                double rank=candidate.score*.73;
+                if(take==requested)rank+=.30;
+                else rank-=.45*(requested-take)/(double)requested;
+                if(!used[candidate.source])rank+=.06;
+                if(previous!=null) {
+                    double color=VisualMatcher.visualContinuity(previous.exit,candidate.entry);
+                    double direction=VisualMatcher.directionalContinuity(
+                        previous.dx,previous.dy,candidate.dx,candidate.dy);
+                    if(edit.matching==EditInstructions.Matching.MOTION)
+                        rank+=.42*direction+.08*color;
+                    else if(edit.matching==EditInstructions.Matching.VISUAL_OBJECT)
+                        rank+=.46*color+.04*direction;
+                    else rank+=.18*color+.12*direction;
+                    if(previous.source==candidate.source)rank-=.12;
+                }
+                if(rank>bestRank) {bestRank=rank;best=candidate;bestLength=take;}
             }
+            if(best==null)break;
+            Shot selected=best.trimmed(bestLength);
+            chosen.add(selected);
+            used[selected.source]=true;
+            previous=selected;
         }
-        return result;
+        return chosen;
     }
     private Bitmap sample(MediaMetadataRetriever r,long ms) {
-        try{return r.getScaledFrameAtTime(ms*1000,MediaMetadataRetriever.OPTION_CLOSEST,64,64);}
-        catch(Exception ignored){return null;}
+        try {
+            Bitmap frame=r.getScaledFrameAtTime(ms*1000,MediaMetadataRetriever.OPTION_CLOSEST,96,96);
+            if(frame==null)return null;
+            if(frame.getWidth()==64&&frame.getHeight()==64)return frame;
+            Bitmap square=Bitmap.createScaledBitmap(frame,64,64,true);
+            if(square!=frame)frame.recycle();
+            return square;
+        } catch(Exception ignored){return null;}
     }
     private double quality(Bitmap a,Bitmap b) {
         if(a==null)return .25;
