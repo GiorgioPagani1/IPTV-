@@ -12,7 +12,7 @@
 GitHub Actions → ReelBot APK → успешный запуск → Artifacts → ReelBot-Android-APK → извлечь app-debug.apk и установить на Android 10+.
 
 ## Сборка
-Gradle 8.11.1, Android Gradle Plugin 8.9.2, Android SDK 35, JDK 17.
+Gradle 8.11.1, Android Gradle Plugin 8.10.1, Android SDK 36, JDK 17.
 В каталоге ReelBot выполнить gradle :app:assembleDebug.
 
 ## Ограничения
