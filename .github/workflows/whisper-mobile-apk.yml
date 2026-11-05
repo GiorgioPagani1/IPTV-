@@ -27,8 +27,15 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # GitHub ubuntu-24.04 runners already provide Android SDK command-line tools.
+      # android-actions/setup-android@v3 attempts to install the removed legacy
+      # sdkmanager package "tools" and fails (Nov 2026).
+      - name: Find Android SDK
+        shell: bash
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME}"
+          command -v sdkmanager
+          sdkmanager --version
 
       - name: Install required Android components
         shell: bash
