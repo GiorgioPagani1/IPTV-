@@ -1,0 +1,65 @@
+name: Whisper Mobile Android APK
+
+on:
+  push:
+    branches:
+      - whisper-mobile
+    paths:
+      - ".github/workflows/whisper-mobile-apk.yml"
+      - "source-archive/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build APK for Android ARM64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android components
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973" "cmake;3.22.1"
+
+      - name: Set up Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Reconstruct the complete Android source project
+        shell: bash
+        run: |
+          cat source-archive/part*.b64 | tr -d '\n\r' | base64 -d > whisper-mobile.tar.xz
+          xz -t whisper-mobile.tar.xz
+          tar -xJf whisper-mobile.tar.xz
+          test -f WhisperMobile/app/build.gradle.kts
+          test -f WhisperMobile/app/src/main/cpp/whisper_jni.cpp
+
+      - name: Compile Android APK (Whisper native C++ via CMake)
+        working-directory: WhisperMobile
+        shell: bash
+        run: gradle --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Publish installable APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhisperMobile-Android-APK
+          path: WhisperMobile/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 30
